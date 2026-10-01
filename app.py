@@ -15,7 +15,7 @@ DNTRADE_URL = "https://api.dntrade.com.ua"
 IBAN_URL = "https://api.ibanoplata.com"
 
 def extract_tag_names(tags_raw):
-    """Витягує назви міток незалежно від того, чи віддав DNTrade рядок чи словник"""
+    """Витягує назви міток незалежно від того, у якому форматі DNTrade повертає масив"""
     names = []
     for tag in tags_raw:
         if isinstance(tag, dict):
@@ -26,6 +26,24 @@ def extract_tag_names(tags_raw):
             names.append(str(tag))
     return names
 
+def get_orders(headers):
+    """Спроба отримати замовлення через стандартні Ендпоінти DNTrade"""
+    endpoints = [
+        f"{DNTRADE_URL}/api/orders",
+        f"{DNTRADE_URL}/api/v1/orders",
+        f"{DNTRADE_URL}/api/v1/sales-orders"
+    ]
+    for url in endpoints:
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                orders = data.get("data", []) if isinstance(data, dict) else data
+                return orders, url
+        except Exception:
+            continue
+    return None, None
+
 def process_orders():
     print("--- Фонова перевірка замовлень запущена ---", flush=True)
     while True:
@@ -34,31 +52,29 @@ def process_orders():
                 "Authorization": f"Bearer {DNTRADE_TOKEN}",
                 "Content-Type": "application/json"
             }
-            res = requests.get(f"{DNTRADE_URL}/api/v1/orders", headers=headers)
             
-            if res.status_code == 200:
-                orders = res.json().get("data", [])
-                print(f"Отримано замовлень від DNTrade: {len(orders)}", flush=True)
+            orders, working_url = get_orders(headers)
+            
+            if orders is not None:
+                print(f"Отримано замовлень від DNTrade: {len(orders)} (через {working_url})", flush=True)
                 
                 for order in orders:
                     raw_tags = order.get("tags", [])
                     tag_names = extract_tag_names(raw_tags)
                     order_id = order.get("id")
                     
-                    # Перевіряємо суму (з підтримкою різних форматів)
                     total_sum = 0.0
                     try:
                         total_sum = float(order.get("sum", 0) or order.get("total_sum", 0))
                     except (ValueError, TypeError):
                         total_sum = 0.0
 
-                    # Перевіряємо, чи вже готове посилання
+                    # Якщо посилання вже створено — пропускаємо
                     if any("посилання готове" in name.lower() for name in tag_names):
                         continue
 
                     pay_link = None
 
-                    # Шукаємо мітку передплати або повної оплати
                     has_prepay = any("передплата" in name.lower() for name in tag_names)
                     has_fullpay = any("повна оплата" in name.lower() for name in tag_names)
 
@@ -86,7 +102,6 @@ def process_orders():
                             print("Помилка створення інвойсу IBAN:", e, flush=True)
 
                     if pay_link:
-                        # Формуємо новий список міток
                         new_tags = [name for name in tag_names if not any(k in name.lower() for k in ["передплата", "повна оплата"])]
                         new_tags.append("Посилання готове")
                         
@@ -96,11 +111,12 @@ def process_orders():
                             "tags": new_tags
                         }
                         
-                        update_res = requests.put(f"{DNTRADE_URL}/api/v1/orders/{order_id}", json=update_data, headers=headers)
+                        update_url = f"{working_url}/{order_id}"
+                        update_res = requests.put(update_url, json=update_data, headers=headers)
                         print(f"Результат оновлення №{order_id}: Статус {update_res.status_code} | Відповідь: {update_res.text}", flush=True)
 
             else:
-                print(f"Помилка DNTrade API: {res.status_code} - {res.text}", flush=True)
+                print("Помилка DNTrade API: Не вдалося підключитися до жодного ендпоінту (404/Auth Error)", flush=True)
 
         except Exception as e:
             print("Помилка в циклі обробки:", e, flush=True)
