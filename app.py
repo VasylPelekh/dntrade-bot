@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 
-# --- Перемінні з Render ---
+# --- Змінні з Render ---
 DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua")
 DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
 
@@ -72,30 +72,31 @@ def create_full_iban_link(order_id: str, order_number: str | int, amount: float)
 
 def update_dntrade_order(order: dict, payment_link: str) -> bool:
     """
-    Оновлення замовлення через ендпоінт POST /doc_order/upload.
-    Передаємо номер замовлення, новий статус та коментар.
+    Оновлення замовлення у DNTrade через POST /orders/upload.
+    Передаємо масив 'orders', де comment всередині personal_info.
     """
-    url = f"{DNTRADE_API_URL}/doc_order/upload"
+    url = f"{DNTRADE_API_URL}/orders/upload"
     
-    order_number = order.get("number") or order.get("code") or order.get("id")
-    
+    order_id = str(order.get("id"))
+    order_number = str(order.get("number", order_id))
+
     payload = {
         "orders": [
             {
-                "id": str(order.get("id")),
-                "number": str(order_number),
-                "status_id": STATUS_WAITING_PAYMENT,
-                "comment": f"Посилання на оплату: {payment_link}",
+                "id": order_id,
+                "number": order_number,
+                "status": STATUS_WAITING_PAYMENT,
                 "personal_info": {
                     "comment": f"Посилання на оплату: {payment_link}"
                 }
             }
         ]
     }
+
     try:
         response = requests.post(url, json=payload, headers=HEADERS_DNTRADE, timeout=10)
-        logging.info(f"Відповідь DNTrade doc_order/upload [{response.status_code}]: {response.text}")
-        if response.status_code == 200:
+        logging.info(f"Відповідь DNTrade orders/upload [{response.status_code}]: {response.text}")
+        if response.status_code in (200, 201):
             logging.info(f"Замовлення №{order_number} успішно оновлено")
             return True
         return False
@@ -114,7 +115,7 @@ def run_pipeline():
             timeout=10
         )
         if response.status_code != 200:
-            logging.error(f"Не вдалося отримати список замовлень: {response.text}")
+            logging.error(f"Не вдалося отримати список замовлень з DNTrade: {response.text}")
             return
 
         data = response.json()
