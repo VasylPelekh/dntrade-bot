@@ -11,7 +11,8 @@ IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-DNTRADE_URL = "https://dimaromatu.dntrade.com.ua"
+# Чіткий базовий URL з офіційної документації DNTrade
+DNTRADE_URL = "https://api.dntrade.com.ua"
 IBAN_URL = "https://api.ibanoplata.com"
 
 def extract_tag_names(tags_raw):
@@ -29,12 +30,12 @@ def extract_tag_names(tags_raw):
     return names
 
 def get_orders(headers):
-    """Запит замовлень через правильний REST API ендпоінт DNTrade"""
+    """Шукаємо ендпоінт замовлень у базі API DNTrade"""
     endpoints = [
-        f"{DNTRADE_URL}/api/v1/sales-orders",
-        f"{DNTRADE_URL}/api/v1/sales-order",
-        f"{DNTRADE_URL}/api/sales-orders",
-        f"{DNTRADE_URL}/api/v1/orders"
+        f"{DNTRADE_URL}/v1/orders",
+        f"{DNTRADE_URL}/api/v1/orders",
+        f"{DNTRADE_URL}/v1/sales-orders",
+        f"{DNTRADE_URL}/api/v1/sales-orders"
     ]
     
     for url in endpoints:
@@ -45,7 +46,7 @@ def get_orders(headers):
                 orders = data.get("data", []) if isinstance(data, dict) else data
                 return orders, url
             else:
-                print(f"Спроба {url} -> Статус: {res.status_code}", flush=True)
+                print(f"Спроба {url} -> Статус: {res.status_code} | Відповідь: {res.text}", flush=True)
         except Exception as e:
             print(f"Помилка з'єднання з {url}: {e}", flush=True)
             
@@ -54,12 +55,14 @@ def get_orders(headers):
 def process_orders():
     print("--- Фонова перевірка замовлень запущена ---", flush=True)
     
+    if not DNTRADE_TOKEN:
+        print(" УВАГА: DNTRADE_TOKEN відсутній у змінних оточення Render!", flush=True)
+
     while True:
         try:
-            # Передаємо авторизацію через обидва стандартні варіанти ключів DNTrade
+            # Авторизація чітко за документацією DNTrade: ApiKey
             headers = {
-                "X-Api-Key": DNTRADE_TOKEN,
-                "Authorization": f"Bearer {DNTRADE_TOKEN}",
+                "ApiKey": DNTRADE_TOKEN,
                 "Content-Type": "application/json",
                 "Accept": "application/json"
             }
@@ -127,7 +130,7 @@ def process_orders():
                         print(f"Результат оновлення №{order_id}: Статус {update_res.status_code} | Відповідь: {update_res.text}", flush=True)
 
             else:
-                print("Помилка: DNTrade не дав відповіді 200 OK. Перевірте API-токен у змінних Render.", flush=True)
+                print("Помилка: Перевірте авторизаційний токен у змінних Render.", flush=True)
 
         except Exception as e:
             print("Помилка в циклі обробки:", e, flush=True)
