@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 
-# --- Змінні з Render ---
+# --- Перемінні з Render ---
 DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua")
 DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
 
@@ -17,7 +17,6 @@ IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-# ID статусів
 STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))       # Передплата (15)
 STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16)) # Передплата/Післясплата (16)
 STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1)) # ОЧІКУЄМО ОПЛАТУ (1)
@@ -34,11 +33,10 @@ HEADERS_IBAN = {
 
 
 def calculate_order_total(order: dict) -> float:
-    """Розрахунок суми замовлення."""
     if "sum" in order and order["sum"] is not None:
         try:
             return float(order["sum"])
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
     cart = order.get("cart", [])
@@ -52,7 +50,6 @@ def calculate_order_total(order: dict) -> float:
 
 
 def create_full_iban_link(order_id: str, order_number: str | int, amount: float) -> str | None:
-    """Генерація посилання на ПОВНУ суму через IBAN-Oplata API."""
     url = f"{IBAN_OPLATA_API_URL}/v1/payments/create"
     payload = {
         "order_id": str(order_id),
@@ -71,12 +68,7 @@ def create_full_iban_link(order_id: str, order_number: str | int, amount: float)
 
 
 def update_dntrade_order(order: dict, payment_link: str) -> bool:
-    """
-    Оновлення замовлення у DNTrade через POST /orders/upload.
-    Передаємо масив 'orders', де comment всередині personal_info.
-    """
     url = f"{DNTRADE_API_URL}/orders/upload"
-    
     order_id = str(order.get("id"))
     order_number = str(order.get("number", order_id))
 
@@ -105,6 +97,16 @@ def update_dntrade_order(order: dict, payment_link: str) -> bool:
         return False
 
 
+def extract_status_id(raw_status) -> int | None:
+    """Гнучке витягування ID статусу з будь-якого типу даних."""
+    if isinstance(raw_status, dict):
+        raw_status = raw_status.get("id") or raw_status.get("code") or raw_status.get("value")
+    try:
+        return int(raw_status)
+    except (ValueError, TypeError):
+        return None
+
+
 def run_pipeline():
     logging.info("--- Старт обробки замовлень ---")
     try:
@@ -125,28 +127,25 @@ def run_pipeline():
 
         logging.info(f"Отримано замовлень з DNTrade: {len(orders)}")
 
+        if orders:
+            # ДРУКУЄМО ПЕРШЕ ЗАМОВЛЕННЯ В ЛОГ, ЩОБ ПОБАЧИТИ СТРУКТУРУ ПОЛІВ
+            first = orders[0]
+            logging.info(f"Приклад замовлення: ID={first.get('id')}, Number={first.get('number')}, Status={first.get('status')}")
+
     except Exception as e:
         logging.error(f"Помилка під час запиту замовлень: {e}")
         return
 
+    processed_count = 0
     for order in orders:
         order_id = order.get("id")
         order_number = order.get("number", order_id)
-        raw_status = order.get("status")
-
-        if isinstance(raw_status, dict):
-            status_id = raw_status.get("id")
-        else:
-            status_id = raw_status
-
-        try:
-            status_id = int(status_id)
-        except (ValueError, TypeError):
-            continue
+        status_id = extract_status_id(order.get("status"))
 
         if status_id not in (STATUS_PREPAY_FULL, STATUS_PREPAY_PARTIAL):
             continue
 
+        processed_count += 1
         logging.info(f"ЗНАЙДЕНО ЗБІГ! Замовлення №{order_number} (ID: {order_id}), статус: {status_id}")
 
         total_sum = calculate_order_total(order)
@@ -160,7 +159,7 @@ def run_pipeline():
         if link_to_save:
             update_dntrade_order(order, link_to_save)
 
-    logging.info("--- Обробка завершена ---")
+    logging.info(f"--- Обробку завершено. Опрацьовано замовлень: {processed_count} ---")
 
 
 @app.route("/cron/process", methods=["GET", "POST"])
