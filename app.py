@@ -17,7 +17,7 @@ IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-# ID станів замовлення з DNTrade (числові ID)
+# ID станів замовлення з DNTrade (за замовчуванням 15 та 16)
 STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))        # Повна передплата
 STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16))  # Передплата + Післясплата
 STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1))  # Очікуємо оплату
@@ -120,6 +120,11 @@ def run_pipeline():
 
         logging.info(f"Отримано замовлень з DNTrade: {len(orders)}")
 
+        # ВИВЕДЕМО ВСІ ЗНАЙДЕНІ order_status ДЛЯ ДІАГНОСТИКИ
+        statuses_found = [o.get("order_status") for o in orders if "order_status" in o]
+        logging.info(f"Знайдені order_status серед 50 замовлень: {set(statuses_found)}")
+        logging.info(f"Шукаємо статуси: STATUS_PREPAY_FULL={STATUS_PREPAY_FULL}, STATUS_PREPAY_PARTIAL={STATUS_PREPAY_PARTIAL}")
+
         processed_count = 0
 
         for order in orders:
@@ -132,7 +137,6 @@ def run_pipeline():
             except (ValueError, TypeError):
                 continue
 
-            # Перевіряємо за станом замовлення (order_status)
             if order_status not in (STATUS_PREPAY_FULL, STATUS_PREPAY_PARTIAL):
                 continue
 
