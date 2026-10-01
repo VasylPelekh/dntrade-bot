@@ -7,20 +7,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 
-# Параметри DNTrade згідно з документацією
+# Конфігурація DNTrade
 DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua")
 DNTRADE_API_KEY = os.environ.get("DNTRADE_API_KEY")
 
-# Параметри IBAN Oplata
+# Конфігурація IBAN Oplata
 IBAN_OPLATA_API_URL = os.environ.get("IBAN_OPLATA_API_URL", "https://api.iban-oplata.com")
 IBAN_OPLATA_API_KEY = os.environ.get("IBAN_OPLATA_API_KEY")
 
-# ID статусів з вашої бази DNTrade
+# ID статусів з вашої системи DNTrade
 STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 1))       # Статус: "Передплата"
 STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 2)) # Статус: "Передплата/Післясплата"
-STATUS_READY = int(os.environ.get("STATUS_READY", 3))                   # Статус: "Оплата сформована"
+STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 3)) # Статус: "ОЧІКУЄМО ОПЛАТУ"
 
-# Готові посилання для часткової передплати
+# Готові посилання для фіксованої передплати
 LINK_200 = os.environ.get("LINK_PREPAY_200", "https://your-iban-link.com/200")
 LINK_500 = os.environ.get("LINK_PREPAY_500", "https://your-iban-link.com/500")
 
@@ -47,29 +47,29 @@ def create_full_iban_link(order: dict) -> str | None:
         response = requests.post(url, json=payload, headers=HEADERS_IBAN, timeout=10)
         if response.status_code in (200, 201):
             return response.json().get("payment_url")
-        logging.error(f"Помилка створення посилання IBAN: {response.text}")
+        logging.error(f"Помилка створення IBAN посилання: {response.text}")
         return None
     except Exception as e:
         logging.error(f"Збій запиту до IBAN API: {e}")
         return None
 
 
-def update_dntrade_order(order_id: str, payment_link: str, target_status_id: int) -> bool:
-    """Оновлення замовлення у DNTrade (запис у 'comment' та переведення в 'Оплата сформована')."""
+def update_dntrade_order(order_id: str, payment_link: str) -> bool:
+    """Оновлення замовлення: запис посилання в 'comment' та зміна статусу на 'ОЧІКУЄМО ОПЛАТУ'."""
     url = f"{DNTRADE_API_URL}/orders/upload"
     payload = {
         "orders": [
             {
                 "id": order_id,
                 "comment": f"Посилання на оплату: {payment_link}",
-                "status": target_status_id
+                "status": STATUS_WAITING_PAYMENT
             }
         ]
     }
     try:
         response = requests.post(url, json=payload, headers=HEADERS_DNTRADE, timeout=10)
         if response.status_code == 200:
-            logging.info(f"Замовлення {order_id} оновлено: додано коментар та статус {target_status_id}")
+            logging.info(f"Замовлення {order_id} оновлено: додано коментар та статус 'ОЧІКУЄМО ОПЛАТУ' ({STATUS_WAITING_PAYMENT})")
             return True
         else:
             logging.error(f"Помилка оновлення DNTrade [{response.status_code}]: {response.text}")
@@ -80,7 +80,7 @@ def update_dntrade_order(order_id: str, payment_link: str, target_status_id: int
 
 
 def process_orders_by_status(status_id: int, is_full_prepayment: bool):
-    """Отримання та обробка замовлень за конкретним статусом."""
+    """Отримання та обробка замовлень за вказаним статусом."""
     try:
         response = requests.get(
             f"{DNTRADE_API_URL}/orders/list",
@@ -106,25 +106,27 @@ def process_orders_by_status(status_id: int, is_full_prepayment: bool):
             # Повна передплата -> генеруємо нове посилання
             link_to_save = create_full_iban_link(order)
         else:
-            # Часткова передплата -> вибираємо готове за сумою
+            # Часткова передплата -> вибираємо готове залежно від суми
             if total_sum < 1500:
                 link_to_save = LINK_200
             else:
                 link_to_save = LINK_500
 
-        # Якщо посилання отримано/визначено -> записуємо в comment і міняємо статус
+        # Якщо посилання сформовано -> записуємо в comment і міняємо статус на "ОЧІКУЄМО ОПЛАТУ"
         if link_to_save:
-            update_dntrade_order(order_id, link_to_save, STATUS_READY)
+            update_dntrade_order(order_id, link_to_save)
 
 
 def run_pipeline():
-    """Запуск перевірки для обох статусів."""
+    """Запуск перевірки для статусів 'Передплата' та 'Передплата/Післясплата'."""
     logging.info("--- Старт обробки замовлень ---")
-    # 1. Обробка замовлень у статусі "Передплата"
+    
+    # 1. Замовлення у статусі "Передплата"
     process_orders_by_status(STATUS_PREPAY_FULL, is_full_prepayment=True)
     
-    # 2. Обробка замовлень у статусі "Передплата/Післясплата"
+    # 2. Замовлення у статусі "Передплата/Післясплата"
     process_orders_by_status(STATUS_PREPAY_PARTIAL, is_full_prepayment=False)
+    
     logging.info("--- Обробку завершено ---")
 
 
