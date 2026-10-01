@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import requests
 from flask import Flask, jsonify
@@ -97,16 +98,6 @@ def update_dntrade_order(order: dict, payment_link: str) -> bool:
         return False
 
 
-def extract_status_id(raw_status) -> int | None:
-    """Гнучке витягування ID статусу з будь-якого типу даних."""
-    if isinstance(raw_status, dict):
-        raw_status = raw_status.get("id") or raw_status.get("code") or raw_status.get("value")
-    try:
-        return int(raw_status)
-    except (ValueError, TypeError):
-        return None
-
-
 def run_pipeline():
     logging.info("--- Старт обробки замовлень ---")
     try:
@@ -117,7 +108,7 @@ def run_pipeline():
             timeout=10
         )
         if response.status_code != 200:
-            logging.error(f"Не вдалося отримати список замовлень з DNTrade: {response.text}")
+            logging.error(f"Помилка DNTrade API: {response.text}")
             return
 
         data = response.json()
@@ -128,38 +119,14 @@ def run_pipeline():
         logging.info(f"Отримано замовлень з DNTrade: {len(orders)}")
 
         if orders:
-            # ДРУКУЄМО ПЕРШЕ ЗАМОВЛЕННЯ В ЛОГ, ЩОБ ПОБАЧИТИ СТРУКТУРУ ПОЛІВ
-            first = orders[0]
-            logging.info(f"Приклад замовлення: ID={first.get('id')}, Number={first.get('number')}, Status={first.get('status')}")
+            # РОЗДРУКОВУЄМО ПОВНИЙ JSON ПЕРШОГО ЗАМОВЛЕННЯ ДЛЯ ПЕРЕВІРКИ СТРУКТУРИ
+            logging.info(f"СТРУКТУРА ЗАМОВЛЕННЯ: {json.dumps(orders[0], ensure_ascii=False)}")
 
     except Exception as e:
         logging.error(f"Помилка під час запиту замовлень: {e}")
         return
 
-    processed_count = 0
-    for order in orders:
-        order_id = order.get("id")
-        order_number = order.get("number", order_id)
-        status_id = extract_status_id(order.get("status"))
-
-        if status_id not in (STATUS_PREPAY_FULL, STATUS_PREPAY_PARTIAL):
-            continue
-
-        processed_count += 1
-        logging.info(f"ЗНАЙДЕНО ЗБІГ! Замовлення №{order_number} (ID: {order_id}), статус: {status_id}")
-
-        total_sum = calculate_order_total(order)
-        link_to_save = None
-
-        if status_id == STATUS_PREPAY_FULL:
-            link_to_save = create_full_iban_link(order_id, order_number, total_sum)
-        elif status_id == STATUS_PREPAY_PARTIAL:
-            link_to_save = LINK_200 if total_sum < 1500 else LINK_500
-
-        if link_to_save:
-            update_dntrade_order(order, link_to_save)
-
-    logging.info(f"--- Обробку завершено. Опрацьовано замовлень: {processed_count} ---")
+    logging.info("--- Обробку завершено ---")
 
 
 @app.route("/cron/process", methods=["GET", "POST"])
