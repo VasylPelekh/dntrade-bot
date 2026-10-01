@@ -1,5 +1,4 @@
 import os
-import json
 import logging
 import requests
 from flask import Flask, jsonify
@@ -8,17 +7,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 
-# --- Змінні середовища ---
+# --- Перемінні середовища з Render ---
 DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua")
 DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
 
 IBAN_OPLATA_API_URL = os.environ.get("IBAN_OPLATA_API_URL", "https://api.iban-oplata.com")
 IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 
-# ID станів замовлення з DNTrade (порядок і ID задаються в налаштуваннях DNTrade)
-STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))        # Передплата (15)
-STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16))  # Передплата/Післясплата (16)
-STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1))  # Очікуємо оплату (1)
+LINK_200 = os.environ.get("LINK_200")
+LINK_500 = os.environ.get("LINK_500")
+
+# ID станів замовлення з DNTrade (числові ID)
+STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))        # Повна передплата
+STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16))  # Передплата + Післясплата
+STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1))  # Очікуємо оплату
 
 HEADERS_DNTRADE = {
     "ApiKey": DNTRADE_TOKEN,
@@ -32,7 +34,7 @@ HEADERS_IBAN = {
 
 
 def calculate_order_total(order: dict) -> float:
-    """Отримує суму замовлення з поля total_price або підраховує по позиціях."""
+    """Бере суму з total_price або підраховує по товарах."""
     if "total_price" in order and order["total_price"] is not None:
         try:
             return float(order["total_price"])
@@ -53,7 +55,7 @@ def calculate_order_total(order: dict) -> float:
 
 
 def create_full_iban_link(order_id: str, order_number: str | int, amount: float) -> str | None:
-    """Створює посилання на оплату через IBAN API."""
+    """Генерація динамічного посилання через IBAN API."""
     url = f"{IBAN_OPLATA_API_URL}/v1/payments/create"
     payload = {
         "order_id": str(order_id),
@@ -71,15 +73,15 @@ def create_full_iban_link(order_id: str, order_number: str | int, amount: float)
         return None
 
 
-def update_dntrade_order(order_external_id: str, order_number: str | int, payment_link: str) -> bool:
-    """Оновлює стан замовлення в DNTrade та додає посилання на оплату в примітку/коментар."""
+def update_dntrade_order(external_id: str, order_number: str | int, payment_link: str) -> bool:
+    """Оновлення order_status та поля note у DNTrade."""
     url = f"{DNTRADE_API_URL}/orders/upload"
 
     payload = {
         "orders": [
             {
-                "external_id": order_external_id,
-                "number": str(order_number),
+                "external_id": external_id,
+                "number": order_number,
                 "order_status": STATUS_WAITING_PAYMENT,
                 "note": f"Посилання на оплату: {payment_link}"
             }
@@ -94,7 +96,7 @@ def update_dntrade_order(order_external_id: str, order_number: str | int, paymen
             return True
         return False
     except Exception as e:
-        logging.error(f"Виключення під час оновлення замовлення №{order_number}: {e}")
+        logging.error(f"Помилка під час оновлення замовлення №{order_number}: {e}")
         return False
 
 
@@ -118,7 +120,6 @@ def run_pipeline():
 
         logging.info(f"Отримано замовлень з DNTrade: {len(orders)}")
 
-        target_statuses = (STATUS_PREPAY_FULL, STATUS_PREPAY_PARTIAL)
         processed_count = 0
 
         for order in orders:
@@ -126,29 +127,34 @@ def run_pipeline():
             external_id = order.get("external_id")
             number = order.get("number")
 
-            if order_status in target_statuses:
-                logging.info(f"Знайдено замовлення №{number} (ID: {external_id}) зі станом order_status={order_status}")
+            try:
+                order_status = int(order_status)
+            except (ValueError, TypeError):
+                continue
 
-                amount = calculate_order_total(order)
-                if amount <= 0:
-                    logging.warning(f"Замовлення №{number}: сума є 0 або від'ємна, пропускаємо.")
-                    continue
+            # Перевіряємо за станом замовлення (order_status)
+            if order_status not in (STATUS_PREPAY_FULL, STATUS_PREPAY_PARTIAL):
+                continue
 
-                payment_link = create_full_iban_link(external_id, number, amount)
-                if payment_link:
-                    logging.info(f"Створено посилання для замовлення №{number}: {payment_link}")
-                    if update_dntrade_order(external_id, number, payment_link):
-                        processed_count += 1
-                else:
-                    logging.error(f"Не вдалося згенерувати посилання для замовлення №{number}")
+            logging.info(f"ЗНАЙДЕНО ЗБІГ! Замовлення №{number} (external_id: {external_id}), стан: {order_status}")
 
-        logging.info(f"Опрацьовано замовлень у цій ітерації: {processed_count}")
+            total_sum = calculate_order_total(order)
+            link_to_save = None
+
+            if order_status == STATUS_PREPAY_FULL:
+                link_to_save = create_full_iban_link(external_id, number, total_sum)
+            elif order_status == STATUS_PREPAY_PARTIAL:
+                link_to_save = LINK_200 if total_sum < 1500 else LINK_500
+
+            if link_to_save:
+                if update_dntrade_order(external_id, number, link_to_save):
+                    processed_count += 1
+
+        logging.info(f"--- Обробку завершено. Опрацьовано замовлень: {processed_count} ---")
 
     except Exception as e:
-        logging.error(f"Помилка під час виконання пайплайну: {e}")
+        logging.error(f"Помилка під час виконання: {e}")
         return
-
-    logging.info("--- Обробку завершено ---")
 
 
 @app.route("/cron/process", methods=["GET", "POST"])
