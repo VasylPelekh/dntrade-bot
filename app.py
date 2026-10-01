@@ -29,7 +29,6 @@ def extract_tag_names(tags_raw):
     return names
 
 def fetch_orders(headers):
-    """Опитування ендпоінтів DNTrade API"""
     endpoints = [
         f"{DNTRADE_BASE_URL}/api/v1/sales-orders",
         f"{DNTRADE_BASE_URL}/api/v1/orders",
@@ -45,20 +44,20 @@ def fetch_orders(headers):
                 data = res.json()
                 orders = data.get("data", []) if isinstance(data, dict) else data
                 return orders, url
-            elif res.status_code != 404:
-                print(f"Маршрут {url} -> Статус {res.status_code}: {res.text[:100]}", flush=True)
+            else:
+                print(f"Попытка {url} -> Статус {res.status_code}", flush=True)
         except Exception as e:
-            print(f"Помилка підключення до {url}: {e}", flush=True)
+            print(f"Ошибка запроса к {url}: {e}", flush=True)
             
     return None, None
 
 def process_orders():
-    print("--- Фонова перевірка замовлень запущена ---", flush=True)
+    print("--- Фоновый цикл опроса заказов стартовал ---", flush=True)
 
     while True:
         try:
             if not DNTRADE_TOKEN:
-                print("УВАГА: DNTRADE_TOKEN відсутній!", flush=True)
+                print("ОШИБКА: DNTRADE_TOKEN не найден в настройках Render!", flush=True)
                 time.sleep(20)
                 continue
 
@@ -72,7 +71,7 @@ def process_orders():
             orders, working_url = fetch_orders(headers)
             
             if orders is not None:
-                print(f" Отримано замовлень: {len(orders)} (через {working_url})", flush=True)
+                print(f"Успешно получено заказов: {len(orders)} (через {working_url})", flush=True)
                 
                 for order in orders:
                     raw_tags = order.get("tags", [])
@@ -94,21 +93,21 @@ def process_orders():
 
                     if has_prepay:
                         pay_link = LINK_200 if total_sum <= 1500 else LINK_500
-                        print(f" Передплата для №{order_id}. Сума: {total_sum}. Посилання: {pay_link}", flush=True)
+                        print(f"Предоплата для заказа №{order_id}. Сумма: {total_sum}. Ссылка: {pay_link}", flush=True)
 
                     elif has_fullpay:
                         iban_headers = {"Authorization": f"Bearer {IBAN_TOKEN}"}
                         payload = {
                             "amount": total_sum,
-                            "description": f"Оплата замовлення №{order_id}"
+                            "description": f"Оплата заказа №{order_id}"
                         }
                         try:
                             iban_res = requests.post(f"{IBAN_URL}/v1/Invoice/create", json=payload, headers=iban_headers)
                             if iban_res.status_code in [200, 201]:
                                 pay_link = iban_res.json().get("pageUrl")
-                                print(f" IBAN оплата для №{order_id}: {pay_link}", flush=True)
+                                print(f"IBAN оплата для заказа №{order_id}: {pay_link}", flush=True)
                         except Exception as e:
-                            print("Помилка IBAN API:", e, flush=True)
+                            print("Ошибка IBAN API:", e, flush=True)
 
                     if pay_link:
                         new_tags = [name for name in tag_names if not any(k in name.lower() for k in ["передплата", "повна оплата"])]
@@ -121,22 +120,23 @@ def process_orders():
                         }
                         
                         update_res = requests.put(f"{working_url}/{order_id}", json=update_data, headers=headers)
-                        print(f"Оновлення №{order_id}: Статус {update_res.status_code}", flush=True)
+                        print(f"Обновление заказа №{order_id}: Статус {update_res.status_code}", flush=True)
+
+            else:
+                print("Все URL вернули ошибку. Проверьте правильность токена и поддомена.", flush=True)
 
         except Exception as e:
-            print("Помилка у циклі:", e, flush=True)
+            print("Ошибка в основном цикле:", e, flush=True)
 
-        time.sleep(25)
+        time.sleep(20)
 
-def start_worker():
-    thread = threading.Thread(target=process_orders, daemon=True)
-    thread.start()
-
-start_worker()
+# Гарантированный запуск потока при старте Flask
+thread = threading.Thread(target=process_orders, daemon=True)
+thread.start()
 
 @app.route("/")
 def home():
-    return "DNTrade Bot is running!"
+    return "DNTrade Bot is active!"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
