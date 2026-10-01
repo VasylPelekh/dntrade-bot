@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 
-# --- Перемінні з Render ---
+# --- Змінні з Render ---
 DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua")
 DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
 
@@ -33,71 +33,6 @@ HEADERS_IBAN = {
 }
 
 
-def calculate_order_total(order: dict) -> float:
-    if "sum" in order and order["sum"] is not None:
-        try:
-            return float(order["sum"])
-        except (ValueError, TypeError):
-            pass
-
-    cart = order.get("cart", [])
-    total = 0.0
-    if isinstance(cart, list):
-        for item in cart:
-            price = float(item.get("price", 0))
-            quantity = float(item.get("quantity", 1))
-            total += price * quantity
-    return total
-
-
-def create_full_iban_link(order_id: str, order_number: str | int, amount: float) -> str | None:
-    url = f"{IBAN_OPLATA_API_URL}/v1/payments/create"
-    payload = {
-        "order_id": str(order_id),
-        "amount": amount,
-        "description": f"Оплата за замовлення №{order_number or order_id}"
-    }
-    try:
-        response = requests.post(url, json=payload, headers=HEADERS_IBAN, timeout=10)
-        if response.status_code in (200, 201):
-            return response.json().get("payment_url")
-        logging.error(f"Помилка IBAN API: {response.text}")
-        return None
-    except Exception as e:
-        logging.error(f"Збій запиту до IBAN API: {e}")
-        return None
-
-
-def update_dntrade_order(order: dict, payment_link: str) -> bool:
-    url = f"{DNTRADE_API_URL}/orders/upload"
-    order_id = str(order.get("id"))
-    order_number = str(order.get("number", order_id))
-
-    payload = {
-        "orders": [
-            {
-                "id": order_id,
-                "number": order_number,
-                "status": STATUS_WAITING_PAYMENT,
-                "personal_info": {
-                    "comment": f"Посилання на оплату: {payment_link}"
-                }
-            }
-        ]
-    }
-
-    try:
-        response = requests.post(url, json=payload, headers=HEADERS_DNTRADE, timeout=10)
-        logging.info(f"Відповідь DNTrade orders/upload [{response.status_code}]: {response.text}")
-        if response.status_code in (200, 201):
-            logging.info(f"Замовлення №{order_number} успішно оновлено")
-            return True
-        return False
-    except Exception as e:
-        logging.error(f"Виключення під час оновлення замовлення {order_number}: {e}")
-        return False
-
-
 def run_pipeline():
     logging.info("--- Старт обробки замовлень ---")
     try:
@@ -119,8 +54,15 @@ def run_pipeline():
         logging.info(f"Отримано замовлень з DNTrade: {len(orders)}")
 
         if orders:
-            # РОЗДРУКОВУЄМО ПОВНИЙ JSON ПЕРШОГО ЗАМОВЛЕННЯ ДЛЯ ПЕРЕВІРКИ СТРУКТУРИ
-            logging.info(f"СТРУКТУРА ЗАМОВЛЕННЯ: {json.dumps(orders[0], ensure_ascii=False)}")
+            first = orders[0]
+            # Виводимо ключі, які відповідають за стан та ID
+            logging.info("--- АНАЛІЗ ПОЛІВ DNTRADE ---")
+            logging.info(f"Ключі об'єкта: {list(first.keys())}")
+            logging.info(f"status: {first.get('status')}")
+            logging.info(f"state: {first.get('state')}")
+            logging.info(f"status_id / state_id: status_id={first.get('status_id')}, state_id={first.get('state_id')}")
+            logging.info(f"id / number / code: id={first.get('id')}, number={first.get('number')}, code={first.get('code')}")
+            logging.info(f"ПОВНИЙ JSON ПЕРШОГО ЗАМОВЛЕННЯ: {json.dumps(first, ensure_ascii=False)}")
 
     except Exception as e:
         logging.error(f"Помилка під час запиту замовлень: {e}")
