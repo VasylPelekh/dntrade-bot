@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 
-# --- Отримання змінних оточення з Render ---
+# --- Змінні з Render ---
 DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua")
 DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
 
@@ -17,7 +17,6 @@ IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-# Перевірені ID статусів:
 STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))       # Передплата (15)
 STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16)) # Передплата/Післясплата (16)
 STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1)) # ОЧІКУЄМО ОПЛАТУ (1)
@@ -33,13 +32,13 @@ HEADERS_IBAN = {
 }
 
 
-def create_full_iban_link(order: dict) -> str | None:
+def create_full_iban_link(order_id: str, amount: float) -> str | None:
     """Генерація посилання на ПОВНУ суму через IBAN-Oplata API."""
     url = f"{IBAN_OPLATA_API_URL}/v1/payments/create"
     payload = {
-        "order_id": str(order.get("id")),
-        "amount": order.get("sum") or order.get("total_price"),
-        "description": f"Оплата за замовлення №{order.get('code', order.get('id'))}"
+        "order_id": str(order_id),
+        "amount": amount,
+        "description": f"Оплата за замовлення №{order_id}"
     }
     try:
         response = requests.post(url, json=payload, headers=HEADERS_IBAN, timeout=10)
@@ -58,7 +57,8 @@ def update_dntrade_order(order_id: str, payment_link: str) -> bool:
     payload = {
         "orders": [
             {
-                "id": order_id,
+                "id": str(order_id),
+                "number": str(order_id),
                 "comment": f"Посилання на оплату: {payment_link}",
                 "status": STATUS_WAITING_PAYMENT
             }
@@ -67,7 +67,7 @@ def update_dntrade_order(order_id: str, payment_link: str) -> bool:
     try:
         response = requests.post(url, json=payload, headers=HEADERS_DNTRADE, timeout=10)
         if response.status_code == 200:
-            logging.info(f"Замовлення {order_id} успішно оновлено (новий статус: {STATUS_WAITING_PAYMENT})")
+            logging.info(f"Замовлення {order_id} успішно оновлено")
             return True
         else:
             logging.error(f"Помилка оновлення DNTrade [{response.status_code}]: {response.text}")
@@ -77,62 +77,50 @@ def update_dntrade_order(order_id: str, payment_link: str) -> bool:
         return False
 
 
-def run_pipeline():
-    logging.info("--- Старт обробки замовлень ---")
+def process_by_status(status_id: int, is_full: bool):
+    """Отримання замовлень напряму за конкретним ID статусу."""
     try:
-        # Отримуємо всі останні замовлення
-        response = requests.get(
+        # Запит списку замовлень конкретного статусу
+        res = requests.get(
             f"{DNTRADE_API_URL}/orders/list",
             headers=HEADERS_DNTRADE,
-            params={"limit": 50},
+            params={"status_id": status_id},
             timeout=10
         )
-        if response.status_code != 200:
-            logging.error(f"Не вдалося отримати список замовлень з DNTrade: {response.text}")
+        if res.status_code != 200:
+            logging.error(f"Не вдалося отримати замовлення для статусу {status_id}: {res.text}")
             return
 
-        data = response.json()
-        orders = data.get("orders", []) if isinstance(data, dict) else data
-        logging.info(f"Отримано замовлень з DNTrade: {len(orders)}")
+        data = res.json()
+        orders = data.get("orders", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        logging.info(f"Знайдено {len(orders)} замовлень для статусу {status_id}")
+
+        for order in orders:
+            order_id = order.get("number") or order.get("id") or order.get("code")
+            if not order_id:
+                continue
+
+            total_sum = float(order.get("sum") or order.get("total_price") or 0)
+            link_to_save = None
+
+            if is_full:
+                link_to_save = create_full_iban_link(order_id, total_sum)
+            else:
+                link_to_save = LINK_200 if total_sum < 1500 else LINK_500
+
+            if link_to_save:
+                update_dntrade_order(order_id, link_to_save)
 
     except Exception as e:
-        logging.error(f"Помилка під час запиту замовлень: {e}")
-        return
+        logging.error(f"Помилка обробки статусу {status_id}: {e}")
 
-    for order in orders:
-        order_id = order.get("id")
-        raw_status = order.get("status")
-        
-        # Витягуємо ID статусу
-        current_status = raw_status.get("id") if isinstance(raw_status, dict) else raw_status
 
-        # Логуємо кожен статус у консоль Render:
-        logging.info(f"Замовлення ID={order_id}, raw_status={raw_status}, parsed_status={current_status}")
-
-        try:
-            current_status = int(current_status)
-        except (ValueError, TypeError):
-            continue
-
-        if current_status not in (STATUS_PREPAY_FULL, STATUS_PREPAY_PARTIAL):
-            continue
-
-        logging.info(f"ЗНАЙДЕНО ЗБІГ! Обробляємо замовлення №{order_id} зі статусом {current_status}")
-
-        total_sum = float(order.get("sum") or order.get("total_price") or 0)
-        link_to_save = None
-
-        if current_status == STATUS_PREPAY_FULL:
-            link_to_save = create_full_iban_link(order)
-        elif current_status == STATUS_PREPAY_PARTIAL:
-            if total_sum < 1500:
-                link_to_save = LINK_200
-            else:
-                link_to_save = LINK_500
-
-        if link_to_save:
-            update_dntrade_order(order_id, link_to_save)
-
+def run_pipeline():
+    logging.info("--- Старт обробки замовлень ---")
+    # Обробляємо статус 15 (Передплата)
+    process_by_status(STATUS_PREPAY_FULL, is_full=True)
+    # Обробляємо статус 16 (Передплата/Післясплата)
+    process_by_status(STATUS_PREPAY_PARTIAL, is_full=False)
     logging.info("--- Обробку завершено ---")
 
 
