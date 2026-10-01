@@ -11,7 +11,8 @@ IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-DNTRADE_URL = "https://api.dntrade.com.ua"
+# Вказуємо ваш персональний піддомен DNTrade
+DNTRADE_URL = "https://dimaromatu.dntrade.com.ua"
 IBAN_URL = "https://api.ibanoplata.com"
 
 def extract_tag_names(tags_raw):
@@ -26,7 +27,7 @@ def extract_tag_names(tags_raw):
     return names
 
 def get_orders(headers):
-    # Можливі варіації шляхів до замовлень в DNTrade
+    # Можливі варіації ендпоінтів на вашому піддомені
     endpoints = [
         f"{DNTRADE_URL}/api/v1/orders",
         f"{DNTRADE_URL}/api/orders",
@@ -77,6 +78,7 @@ def process_orders():
                     except (ValueError, TypeError):
                         total_sum = 0.0
 
+                    # Якщо мітка вже "Посилання готове" — пропускаємо
                     if any("посилання готове" in name.lower() for name in tag_names):
                         continue
 
@@ -123,7 +125,7 @@ def process_orders():
                         print(f"Результат оновлення №{order_id}: Статус {update_res.status_code} | Відповідь: {update_res.text}", flush=True)
 
             else:
-                print("Помилка: Жоден з ендпоінтів DNTrade не дав відповіді 200 OK. Перевірте логи вище.", flush=True)
+                print("Помилка: Не вдалося підключитися до жодного ендпоінту на вашому піддомені. Перевірте логи вище.", flush=True)
 
         except Exception as e:
             print("Помилка в циклі обробки:", e, flush=True)
