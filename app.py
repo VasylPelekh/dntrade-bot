@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 
-# --- Переменные из Render ---
+# --- Перемінні з Render ---
 DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua")
 DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
 
@@ -17,7 +17,7 @@ IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-# ID статусов
+# ID статусів
 STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))       # Передплата (15)
 STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16)) # Передплата/Післясплата (16)
 STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1)) # ОЧІКУЄМО ОПЛАТУ (1)
@@ -34,7 +34,7 @@ HEADERS_IBAN = {
 
 
 def calculate_order_total(order: dict) -> float:
-    """Расчет общей суммы заказа по корзине или полю sum."""
+    """Розрахунок загальної суми замовлення."""
     if "sum" in order and order["sum"] is not None:
         try:
             return float(order["sum"])
@@ -52,7 +52,7 @@ def calculate_order_total(order: dict) -> float:
 
 
 def create_full_iban_link(order_id: str, order_number: str | int, amount: float) -> str | None:
-    """Генерация ссылки на ПОЛНУЮ сумму через IBAN-Oplata API."""
+    """Генерація посилання на ПОВНУ суму через IBAN-Oplata API."""
     url = f"{IBAN_OPLATA_API_URL}/v1/payments/create"
     payload = {
         "order_id": str(order_id),
@@ -63,19 +63,15 @@ def create_full_iban_link(order_id: str, order_number: str | int, amount: float)
         response = requests.post(url, json=payload, headers=HEADERS_IBAN, timeout=10)
         if response.status_code in (200, 201):
             return response.json().get("payment_url")
-        logging.error(f"Ошибка IBAN API: {response.text}")
+        logging.error(f"Помилка IBAN API: {response.text}")
         return None
     except Exception as e:
-        logging.error(f"Сбой запроса к IBAN API: {e}")
+        logging.error(f"Збій запиту до IBAN API: {e}")
         return None
 
 
 def update_dntrade_order(order_id: str, payment_link: str) -> bool:
-    """
-    Обновление заказа в DNTrade согласно документации POST /orders/upload:
-    - comment передается внутри personal_info
-    - status передается на верхнем уровне
-    """
+    """Оновлення замовлення в DNTrade (comment всередині personal_info)."""
     url = f"{DNTRADE_API_URL}/orders/upload"
     payload = {
         "id": order_id,
@@ -87,27 +83,28 @@ def update_dntrade_order(order_id: str, payment_link: str) -> bool:
     try:
         response = requests.post(url, json=payload, headers=HEADERS_DNTRADE, timeout=10)
         if response.status_code == 200:
-            logging.info(f"Заказ {order_id} успешно обновлен (переведен в статус {STATUS_WAITING_PAYMENT})")
+            logging.info(f"Замовлення {order_id} успішно оновлено (переведено в статус {STATUS_WAITING_PAYMENT})")
             return True
         else:
-            logging.error(f"Ошибка обновления DNTrade [{response.status_code}]: {response.text}")
+            logging.error(f"Помилка оновлення DNTrade [{response.status_code}]: {response.text}")
             return False
     except Exception as e:
-        logging.error(f"Исключение при обновлении заказа {order_id}: {e}")
+        logging.error(f"Виключення під час оновлення замовлення {order_id}: {e}")
         return False
 
 
 def run_pipeline():
-    logging.info("--- Старт обработки заказов ---")
+    logging.info("--- Старт обробки замовлень ---")
     try:
+        # Ставимо limit=50 (максимум, дозволений DNTrade API)
         response = requests.get(
             f"{DNTRADE_API_URL}/orders/list",
             headers=HEADERS_DNTRADE,
-            params={"limit": 100},
+            params={"limit": 50},
             timeout=10
         )
         if response.status_code != 200:
-            logging.error(f"Не удалось получить список заказов из DNTrade: {response.text}")
+            logging.error(f"Не вдалося отримати список замовлень з DNTrade: {response.text}")
             return
 
         data = response.json()
@@ -116,13 +113,13 @@ def run_pipeline():
         )
 
         if not isinstance(orders, list):
-            logging.error(f"Неожиданный формат ответа от DNTrade: {data}")
+            logging.error(f"Незвичайний формат відповіді від DNTrade: {data}")
             return
 
-        logging.info(f"Получено заказов из DNTrade: {len(orders)}")
+        logging.info(f"Отримано замовлень з DNTrade: {len(orders)}")
 
     except Exception as e:
-        logging.error(f"Ошибка при запросе заказов: {e}")
+        logging.error(f"Помилка під час запиту замовлень: {e}")
         return
 
     for order in orders:
@@ -130,7 +127,7 @@ def run_pipeline():
         order_number = order.get("number", order_id)
         raw_status = order.get("status")
 
-        # Извлекаем ID статуса
+        # Витягуємо ID статусу
         if isinstance(raw_status, dict):
             status_id = raw_status.get("id")
         else:
@@ -141,26 +138,26 @@ def run_pipeline():
         except (ValueError, TypeError):
             continue
 
-        # Обрабатываем только нужные статусы (15 и 16)
+        # Обробляємо лише статуси 15 та 16
         if status_id not in (STATUS_PREPAY_FULL, STATUS_PREPAY_PARTIAL):
             continue
 
-        logging.info(f"НАЙДЕНО СОВПАДЕНИЕ! Заказ №{order_number} (ID: {order_id}), статус: {status_id}")
+        logging.info(f"ЗНАЙДЕНО ЗБІГ! Замовлення №{order_number} (ID: {order_id}), статус: {status_id}")
 
         total_sum = calculate_order_total(order)
         link_to_save = None
 
         if status_id == STATUS_PREPAY_FULL:
-            # Предоплата (15) -> полная ссылка IBAN
+            # Передплата (15) -> повне посилання IBAN
             link_to_save = create_full_iban_link(order_id, order_number, total_sum)
         elif status_id == STATUS_PREPAY_PARTIAL:
-            # Предоплата/Наложенный платеж (16) -> фикс. ссылки
+            # Передплата/Післясплата (16) -> фіксовані посилання
             link_to_save = LINK_200 if total_sum < 1500 else LINK_500
 
         if link_to_save:
             update_dntrade_order(order_id, link_to_save)
 
-    logging.info("--- Обработка завершена ---")
+    logging.info("--- Обробка завершена ---")
 
 
 @app.route("/cron/process", methods=["GET", "POST"])
