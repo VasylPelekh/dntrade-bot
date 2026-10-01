@@ -1,165 +1,139 @@
 import os
-import time
-import threading
-from flask import Flask
+import logging
 import requests
+from flask import Flask, jsonify
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 app = Flask(__name__)
 
-DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
-IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
-LINK_200 = os.environ.get("LINK_200")
-LINK_500 = os.environ.get("LINK_500")
+# Параметри DNTrade згідно з документацією
+DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua")
+DNTRADE_API_KEY = os.environ.get("DNTRADE_API_KEY")
 
-DNTRADE_URL = "https://api.dntrade.com.ua"
-IBAN_URL = "https://api.ibanoplata.com"
+# Параметри IBAN Oplata
+IBAN_OPLATA_API_URL = os.environ.get("IBAN_OPLATA_API_URL", "https://api.iban-oplata.com")
+IBAN_OPLATA_API_KEY = os.environ.get("IBAN_OPLATA_API_KEY")
 
-def get_headers():
-    return {
-        "ApiKey": DNTRADE_TOKEN,
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
+# ID статусів з вашої бази DNTrade
+STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 1))       # Статус: "Передплата"
+STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 2)) # Статус: "Передплата/Післясплата"
+STATUS_READY = int(os.environ.get("STATUS_READY", 3))                   # Статус: "Оплата сформована"
 
-def extract_tag_names(tags_raw):
-    names = []
-    if not tags_raw:
-        return names
-    for tag in tags_raw:
-        if isinstance(tag, dict):
-            names.append(str(tag.get("name", "")))
-        elif isinstance(tag, str):
-            names.append(tag)
-        else:
-            names.append(str(tag))
-    return names
+# Готові посилання для часткової передплати
+LINK_200 = os.environ.get("LINK_PREPAY_200", "https://your-iban-link.com/200")
+LINK_500 = os.environ.get("LINK_PREPAY_500", "https://your-iban-link.com/500")
 
-def fetch_orders():
-    """Запрос списка заказов согласно Swagger DNTrade"""
-    headers = get_headers()
-    endpoints = [
-        f"{DNTRADE_URL}/orders/list",
-        f"{DNTRADE_URL}/v1/orders",
-        f"{DNTRADE_URL}/api/v1/sales-orders"
-    ]
-    
-    for url in endpoints:
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                orders = data.get("data", []) if isinstance(data, dict) else data
-                if isinstance(orders, list):
-                    return orders, url
-            elif res.status_code == 405: # Если требуется POST вместо GET
-                res_post = requests.post(url, json={}, headers=headers, timeout=10)
-                if res_post.status_code == 200:
-                    data = res_post.json()
-                    orders = data.get("data", []) if isinstance(data, dict) else data
-                    if isinstance(orders, list):
-                        return orders, url
-            print(f"[DNTrade API] {url} -> Status: {res.status_code} | Response: {res.text[:120]}", flush=True)
-        except Exception as e:
-            print(f"[DNTrade API Error] {url}: {e}", flush=True)
-            
-    return None, None
+HEADERS_DNTRADE = {
+    "ApiKey": DNTRADE_API_KEY,
+    "Content-Type": "application/json"
+}
 
-def update_order_data(order_id, pay_link, new_tags):
-    """Обновление заказа (теги + комментарий с ссылкой)"""
-    headers = get_headers()
+HEADERS_IBAN = {
+    "Authorization": f"Bearer {IBAN_OPLATA_API_KEY}",
+    "Content-Type": "application/json"
+}
+
+
+def create_full_iban_link(order: dict) -> str | None:
+    """Генерація унікального IBAN-посилання на ПОВНУ суму."""
+    url = f"{IBAN_OPLATA_API_URL}/v1/payments/create"
     payload = {
-        "id": order_id,
-        "comment": f"Посилання на оплату: {pay_link}",
-        "tags": new_tags
+        "order_id": str(order.get("id")),
+        "amount": order.get("sum") or order.get("total_price"),
+        "description": f"Оплата за замовлення №{order.get('code', order.get('id'))}"
     }
-    
-    # Пробуем POST /orders/upload и PUT /v1/orders/{id}
-    upload_url = f"{DNTRADE_URL}/orders/upload"
-    res = requests.post(upload_url, json={"orders": [payload]}, headers=headers, timeout=10)
-    
-    if res.status_code in [200, 201]:
-        print(f"Заказ №{order_id} успешно обновлен через {upload_url}", flush=True)
-        return True
-    
-    # Резервный PUT запрос
-    put_url = f"{DNTRADE_URL}/v1/orders/{order_id}"
-    res_put = requests.put(put_url, json=payload, headers=headers, timeout=10)
-    print(f"Результат обновления №{order_id} (PUT): Status {res_put.status_code}", flush=True)
-    return res_put.status_code in [200, 201, 204]
+    try:
+        response = requests.post(url, json=payload, headers=HEADERS_IBAN, timeout=10)
+        if response.status_code in (200, 201):
+            return response.json().get("payment_url")
+        logging.error(f"Помилка створення посилання IBAN: {response.text}")
+        return None
+    except Exception as e:
+        logging.error(f"Збій запиту до IBAN API: {e}")
+        return None
 
-def process_orders():
-    print("=== Запуск бота по спецификации Swagger DNTrade ===", flush=True)
 
-    while True:
-        try:
-            if not DNTRADE_TOKEN:
-                print("ОШИБКА: DNTRADE_TOKEN отсутствует в настройках Render!", flush=True)
-                time.sleep(20)
-                continue
+def update_dntrade_order(order_id: str, payment_link: str, target_status_id: int) -> bool:
+    """Оновлення замовлення у DNTrade (запис у 'comment' та переведення в 'Оплата сформована')."""
+    url = f"{DNTRADE_API_URL}/orders/upload"
+    payload = {
+        "orders": [
+            {
+                "id": order_id,
+                "comment": f"Посилання на оплату: {payment_link}",
+                "status": target_status_id
+            }
+        ]
+    }
+    try:
+        response = requests.post(url, json=payload, headers=HEADERS_DNTRADE, timeout=10)
+        if response.status_code == 200:
+            logging.info(f"Замовлення {order_id} оновлено: додано коментар та статус {target_status_id}")
+            return True
+        else:
+            logging.error(f"Помилка оновлення DNTrade [{response.status_code}]: {response.text}")
+            return False
+    except Exception as e:
+        logging.error(f"Виключення під час оновлення замовлення: {e}")
+        return False
 
-            orders, working_url = fetch_orders()
 
-            if orders is not None:
-                print(f"Получено заказов: {len(orders)} (через {working_url})", flush=True)
+def process_orders_by_status(status_id: int, is_full_prepayment: bool):
+    """Отримання та обробка замовлень за конкретним статусом."""
+    try:
+        response = requests.get(
+            f"{DNTRADE_API_URL}/orders/list",
+            headers=HEADERS_DNTRADE,
+            params={"status": status_id},
+            timeout=10
+        )
+        if response.status_code != 200:
+            logging.error(f"Не вдалося отримати замовлення для статусу {status_id}: {response.text}")
+            return
 
-                for order in orders:
-                    order_id = order.get("id")
-                    if not order_id:
-                        continue
+        orders = response.json().get("orders", [])
+    except Exception as e:
+        logging.error(f"Помилка запиту списку замовлень: {e}")
+        return
 
-                    raw_tags = order.get("tags", [])
-                    tag_names = extract_tag_names(raw_tags)
+    for order in orders:
+        order_id = order.get("id")
+        total_sum = float(order.get("sum") or order.get("total_price") or 0)
+        link_to_save = None
 
-                    if any("посилання готове" in name.lower() for name in tag_names):
-                        continue
-
-                    total_sum = 0.0
-                    try:
-                        total_sum = float(order.get("sum", 0) or order.get("total_sum", 0) or order.get("amount", 0))
-                    except (ValueError, TypeError):
-                        total_sum = 0.0
-
-                    pay_link = None
-                    has_prepay = any("передплата" in name.lower() for name in tag_names)
-                    has_fullpay = any("повна оплата" in name.lower() for name in tag_names)
-
-                    if has_prepay:
-                        pay_link = LINK_200 if total_sum <= 1500 else LINK_500
-                        print(f"Предоплата для №{order_id}. Сумма: {total_sum}. Ссылка: {pay_link}", flush=True)
-
-                    elif has_fullpay:
-                        iban_headers = {"Authorization": f"Bearer {IBAN_TOKEN}"}
-                        payload = {
-                            "amount": total_sum,
-                            "description": f"Оплата замовлення №{order_id}"
-                        }
-                        try:
-                            iban_res = requests.post(f"{IBAN_URL}/v1/Invoice/create", json=payload, headers=iban_headers)
-                            if iban_res.status_code in [200, 201]:
-                                pay_link = iban_res.json().get("pageUrl")
-                                print(f"Полная оплата IBAN для №{order_id}: {pay_link}", flush=True)
-                        except Exception as e:
-                            print(f"Ошибка IBAN API: {e}", flush=True)
-
-                    if pay_link:
-                        new_tags = [name for name in tag_names if not any(k in name.lower() for k in ["передплата", "повна оплата"])]
-                        new_tags.append("Посилання готове")
-                        update_order_data(order_id, pay_link, new_tags)
-
+        if is_full_prepayment:
+            # Повна передплата -> генеруємо нове посилання
+            link_to_save = create_full_iban_link(order)
+        else:
+            # Часткова передплата -> вибираємо готове за сумою
+            if total_sum < 1500:
+                link_to_save = LINK_200
             else:
-                print("Не удалось получить заказы. Проверьте правильность токена DNTRADE_TOKEN.", flush=True)
+                link_to_save = LINK_500
 
-        except Exception as e:
-            print(f"Ошибка в цикле обработки: {e}", flush=True)
+        # Якщо посилання отримано/визначено -> записуємо в comment і міняємо статус
+        if link_to_save:
+            update_dntrade_order(order_id, link_to_save, STATUS_READY)
 
-        time.sleep(25)
 
-threading.Thread(target=process_orders, daemon=True).start()
+def run_pipeline():
+    """Запуск перевірки для обох статусів."""
+    logging.info("--- Старт обробки замовлень ---")
+    # 1. Обробка замовлень у статусі "Передплата"
+    process_orders_by_status(STATUS_PREPAY_FULL, is_full_prepayment=True)
+    
+    # 2. Обробка замовлень у статусі "Передплата/Післясплата"
+    process_orders_by_status(STATUS_PREPAY_PARTIAL, is_full_prepayment=False)
+    logging.info("--- Обробку завершено ---")
 
-@app.route("/")
-def home():
-    return "DNTrade Bot Active"
+
+@app.route("/cron/process", methods=["GET", "POST"])
+def cron_handler():
+    run_pipeline()
+    return jsonify({"status": "success"}), 200
+
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
