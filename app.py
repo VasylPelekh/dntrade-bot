@@ -14,40 +14,62 @@ LINK_500 = os.environ.get("LINK_500")
 DNTRADE_URL = "https://api.dntrade.com.ua"
 IBAN_URL = "https://api.ibanoplata.com"
 
+def extract_tag_names(tags_raw):
+    """Витягує назви міток незалежно від того, чи віддав DNTrade рядок чи словник"""
+    names = []
+    for tag in tags_raw:
+        if isinstance(tag, dict):
+            names.append(str(tag.get("name", "")))
+        elif isinstance(tag, str):
+            names.append(tag)
+        else:
+            names.append(str(tag))
+    return names
+
 def process_orders():
-    print("--- Фонова перевірка замовлень запущена ---")
+    print("--- Фонова перевірка замовлень запущена ---", flush=True)
     while True:
         try:
-            headers = {"Authorization": f"Bearer {DNTRADE_TOKEN}"}
+            headers = {
+                "Authorization": f"Bearer {DNTRADE_TOKEN}",
+                "Content-Type": "application/json"
+            }
             res = requests.get(f"{DNTRADE_URL}/api/v1/orders", headers=headers)
             
             if res.status_code == 200:
                 orders = res.json().get("data", [])
-                print(f"Отримано замовлень від DNTrade: {len(orders)}")
+                print(f"Отримано замовлень від DNTrade: {len(orders)}", flush=True)
                 
                 for order in orders:
-                    tags = order.get("tags", [])
+                    raw_tags = order.get("tags", [])
+                    tag_names = extract_tag_names(raw_tags)
                     order_id = order.get("id")
-                    total_sum = float(order.get("sum", 0))
+                    
+                    # Перевіряємо суму (з підтримкою різних форматів)
+                    total_sum = 0.0
+                    try:
+                        total_sum = float(order.get("sum", 0) or order.get("total_sum", 0))
+                    except (ValueError, TypeError):
+                        total_sum = 0.0
 
-                    # Перевіряємо, чи вже оброблено
-                    if "Посилання готове" in tags:
+                    # Перевіряємо, чи вже готове посилання
+                    if any("посилання готове" in name.lower() for name in tag_names):
                         continue
 
                     pay_link = None
 
-                    # Пошук мітки з урахуванням різних варіантів написання
-                    has_prepay_tag = any("передплата" in str(t).lower() for t in tags)
-                    has_fullpay_tag = any("повна оплата" in str(t).lower() for t in tags)
+                    # Шукаємо мітку передплати або повної оплати
+                    has_prepay = any("передплата" in name.lower() for name in tag_names)
+                    has_fullpay = any("повна оплата" in name.lower() for name in tag_names)
 
-                    if has_prepay_tag:
+                    if has_prepay:
                         if total_sum <= 1500:
                             pay_link = LINK_200
                         else:
                             pay_link = LINK_500
-                        print(f"Знайдено замовлення №{order_id} (Передплата). Сума: {total_sum}. Посилання: {pay_link}")
+                        print(f" Знайдено замовлення №{order_id} (Передплата). Сума: {total_sum}. Посилання: {pay_link}", flush=True)
 
-                    elif has_fullpay_tag:
+                    elif has_fullpay:
                         iban_headers = {"Authorization": f"Bearer {IBAN_TOKEN}"}
                         payload = {
                             "amount": total_sum,
@@ -57,31 +79,34 @@ def process_orders():
                             iban_res = requests.post(f"{IBAN_URL}/v1/Invoice/create", json=payload, headers=iban_headers)
                             if iban_res.status_code in [200, 201]:
                                 pay_link = iban_res.json().get("pageUrl")
-                                print(f"Знайдено замовлення №{order_id} (Повна оплата). Згенеровано IBAN: {pay_link}")
+                                print(f" Знайдено замовлення №{order_id} (Повна оплата). IBAN: {pay_link}", flush=True)
                             else:
-                                print(f"Помилка IBAN API: {iban_res.status_code} - {iban_res.text}")
+                                print(f"Помилка IBAN API: {iban_res.status_code} - {iban_res.text}", flush=True)
                         except Exception as e:
-                            print("Помилка створення інвойсу IBAN:", e)
+                            print("Помилка створення інвойсу IBAN:", e, flush=True)
 
                     if pay_link:
-                        new_tags = [t for t in tags if not any(k in str(t).lower() for k in ["передплата", "повна оплата"])]
+                        # Формуємо новий список міток
+                        new_tags = [name for name in tag_names if not any(k in name.lower() for k in ["передплата", "повна оплата"])]
                         new_tags.append("Посилання готове")
                         
                         update_data = {
+                            "comment": f"Посилання на оплату: {pay_link}",
                             "note": f"Посилання на оплату: {pay_link}",
                             "tags": new_tags
                         }
+                        
                         update_res = requests.put(f"{DNTRADE_URL}/api/v1/orders/{order_id}", json=update_data, headers=headers)
-                        print(f"Статус оновлення замовлення №{order_id} в DNTrade: {update_res.status_code}")
+                        print(f"Результат оновлення №{order_id}: Статус {update_res.status_code} | Відповідь: {update_res.text}", flush=True)
+
             else:
-                print(f"Помилка отримання замовлень від DNTrade: {res.status_code} - {res.text}")
+                print(f"Помилка DNTrade API: {res.status_code} - {res.text}", flush=True)
 
         except Exception as e:
-            print("Помилка в циклі обробки замовлень:", e)
+            print("Помилка в циклі обробки:", e, flush=True)
 
-        time.sleep(30)  # Перевірка кожні 30 секунд
+        time.sleep(25)
 
-# Гарантований запуск потоку
 def start_worker():
     thread = threading.Thread(target=process_orders, daemon=True)
     thread.start()
@@ -95,3 +120,4 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
