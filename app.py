@@ -11,12 +11,14 @@ IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-# Вказуємо ваш персональний піддомен DNTrade
 DNTRADE_URL = "https://dimaromatu.dntrade.com.ua"
 IBAN_URL = "https://api.ibanoplata.com"
 
 def extract_tag_names(tags_raw):
+    """Витягує назви міток незалежно від їх формату"""
     names = []
+    if not tags_raw:
+        return names
     for tag in tags_raw:
         if isinstance(tag, dict):
             names.append(str(tag.get("name", "")))
@@ -27,12 +29,12 @@ def extract_tag_names(tags_raw):
     return names
 
 def get_orders(headers):
-    # Можливі варіації ендпоінтів на вашому піддомені
+    """Запит замовлень через правильний REST API ендпоінт DNTrade"""
     endpoints = [
-        f"{DNTRADE_URL}/api/v1/orders",
-        f"{DNTRADE_URL}/api/orders",
         f"{DNTRADE_URL}/api/v1/sales-orders",
-        f"{DNTRADE_URL}/api/sales-orders"
+        f"{DNTRADE_URL}/api/v1/sales-order",
+        f"{DNTRADE_URL}/api/sales-orders",
+        f"{DNTRADE_URL}/api/v1/orders"
     ]
     
     for url in endpoints:
@@ -43,20 +45,20 @@ def get_orders(headers):
                 orders = data.get("data", []) if isinstance(data, dict) else data
                 return orders, url
             else:
-                print(f"Спроба {url} -> Статус: {res.status_code}, Відповідь: {res.text}", flush=True)
+                print(f"Спроба {url} -> Статус: {res.status_code}", flush=True)
         except Exception as e:
-            print(f"Помилка підключення до {url}: {e}", flush=True)
+            print(f"Помилка з'єднання з {url}: {e}", flush=True)
             
     return None, None
 
 def process_orders():
     print("--- Фонова перевірка замовлень запущена ---", flush=True)
-    if not DNTRADE_TOKEN:
-        print(" УВАГА: DNTRADE_TOKEN не знайдено в змінних середовища!", flush=True)
-        
+    
     while True:
         try:
+            # Передаємо авторизацію через обидва стандартні варіанти ключів DNTrade
             headers = {
+                "X-Api-Key": DNTRADE_TOKEN,
                 "Authorization": f"Bearer {DNTRADE_TOKEN}",
                 "Content-Type": "application/json",
                 "Accept": "application/json"
@@ -74,11 +76,11 @@ def process_orders():
                     
                     total_sum = 0.0
                     try:
-                        total_sum = float(order.get("sum", 0) or order.get("total_sum", 0))
+                        total_sum = float(order.get("sum", 0) or order.get("total_sum", 0) or order.get("amount", 0))
                     except (ValueError, TypeError):
                         total_sum = 0.0
 
-                    # Якщо мітка вже "Посилання готове" — пропускаємо
+                    # Якщо посилання вже прикріплено — пропускаємо
                     if any("посилання готове" in name.lower() for name in tag_names):
                         continue
 
@@ -125,7 +127,7 @@ def process_orders():
                         print(f"Результат оновлення №{order_id}: Статус {update_res.status_code} | Відповідь: {update_res.text}", flush=True)
 
             else:
-                print("Помилка: Не вдалося підключитися до жодного ендпоінту на вашому піддомені. Перевірте логи вище.", flush=True)
+                print("Помилка: DNTrade не дав відповіді 200 OK. Перевірте API-токен у змінних Render.", flush=True)
 
         except Exception as e:
             print("Помилка в циклі обробки:", e, flush=True)
