@@ -18,8 +18,8 @@ LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
 # ID станів замовлення з DNTrade (за замовчуванням 15 та 16)
-STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))        # Повна передплата
-STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16))  # Передплата + Післясплата
+STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))        # Передплата
+STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16))  # Передплата/Післясплата
 STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1))  # Очікуємо оплату
 
 HEADERS_DNTRADE = {
@@ -34,7 +34,6 @@ HEADERS_IBAN = {
 
 
 def calculate_order_total(order: dict) -> float:
-    """Бере суму з total_price або підраховує по товарах."""
     if "total_price" in order and order["total_price"] is not None:
         try:
             return float(order["total_price"])
@@ -55,7 +54,6 @@ def calculate_order_total(order: dict) -> float:
 
 
 def create_full_iban_link(order_id: str, order_number: str | int, amount: float) -> str | None:
-    """Генерація динамічного посилання через IBAN API."""
     url = f"{IBAN_OPLATA_API_URL}/v1/payments/create"
     payload = {
         "order_id": str(order_id),
@@ -74,7 +72,6 @@ def create_full_iban_link(order_id: str, order_number: str | int, amount: float)
 
 
 def update_dntrade_order(external_id: str, order_number: str | int, payment_link: str) -> bool:
-    """Оновлення order_status та поля note у DNTrade."""
     url = f"{DNTRADE_API_URL}/orders/upload"
 
     payload = {
@@ -103,10 +100,11 @@ def update_dntrade_order(external_id: str, order_number: str | int, payment_link
 def run_pipeline():
     logging.info("--- Старт обробки замовлень ---")
     try:
+        # Запитуємо замовлення
         response = requests.get(
             f"{DNTRADE_API_URL}/orders/list",
             headers=HEADERS_DNTRADE,
-            params={"limit": 50},
+            params={"limit": 300},
             timeout=10
         )
         if response.status_code != 200:
@@ -118,12 +116,12 @@ def run_pipeline():
             data.get("orders", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
         )
 
-        logging.info(f"Отримано замовлень з DNTrade: {len(orders)}")
+        target_numbers = ["221", "222", "223", 221, 222, 223]
+        target_orders = [o for o in orders if o.get("number") in target_numbers or str(o.get("number")) in ["221", "222", "223"]]
 
-        # ВИВЕДЕМО ВСІ ЗНАЙДЕНІ order_status ДЛЯ ДІАГНОСТИКИ
-        statuses_found = [o.get("order_status") for o in orders if "order_status" in o]
-        logging.info(f"Знайдені order_status серед 50 замовлень: {set(statuses_found)}")
-        logging.info(f"Шукаємо статуси: STATUS_PREPAY_FULL={STATUS_PREPAY_FULL}, STATUS_PREPAY_PARTIAL={STATUS_PREPAY_PARTIAL}")
+        logging.info(f"--- ДЕТАЛІ ДЛЯ ЗАМОВЛЕНЬ 221, 222, 223 (Знайдено: {len(target_orders)}) ---")
+        for t_order in target_orders:
+            logging.info(f"Замовлення №{t_order.get('number')}: order_status={t_order.get('order_status')}, status={t_order.get('status')}, external_id={t_order.get('external_id')}, id={t_order.get('id')}")
 
         processed_count = 0
 
