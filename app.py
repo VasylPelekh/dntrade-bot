@@ -101,31 +101,30 @@ def run_pipeline():
 
     for order in orders:
         order_id = order.get("id")
+        raw_status = order.get("status")
         
-        # Перевіряємо статус (може приходити як число або як dict/string)
-        current_status = order.get("status")
-        if isinstance(current_status, dict):
-            current_status = current_status.get("id")
-        
+        # Витягуємо ID статусу
+        current_status = raw_status.get("id") if isinstance(raw_status, dict) else raw_status
+
+        # Логуємо кожен статус у консоль Render:
+        logging.info(f"Замовлення ID={order_id}, raw_status={raw_status}, parsed_status={current_status}")
+
         try:
             current_status = int(current_status)
         except (ValueError, TypeError):
             continue
 
-        # Якщо статус замовлення не входить у ті, що нам потрібні — пропускаємо
         if current_status not in (STATUS_PREPAY_FULL, STATUS_PREPAY_PARTIAL):
             continue
 
-        logging.info(f"Знайдено замовлення №{order_id} зі статусом {current_status}")
+        logging.info(f"ЗНАЙДЕНО ЗБІГ! Обробляємо замовлення №{order_id} зі статусом {current_status}")
 
         total_sum = float(order.get("sum") or order.get("total_price") or 0)
         link_to_save = None
 
         if current_status == STATUS_PREPAY_FULL:
-            # Повна передплата (ID 15) -> генеруємо посилання
             link_to_save = create_full_iban_link(order)
         elif current_status == STATUS_PREPAY_PARTIAL:
-            # Часткова передплата (ID 16) -> фіксовані посилання
             if total_sum < 1500:
                 link_to_save = LINK_200
             else:
