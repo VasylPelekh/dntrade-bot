@@ -8,19 +8,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 
-# --- Змінні з Render ---
+# --- Змінні середовища ---
 DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua")
 DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
 
 IBAN_OPLATA_API_URL = os.environ.get("IBAN_OPLATA_API_URL", "https://api.iban-oplata.com")
 IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 
-LINK_200 = os.environ.get("LINK_200")
-LINK_500 = os.environ.get("LINK_500")
-
-STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))       # Передплата (15)
-STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16)) # Передплата/Післясплата (16)
-STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1)) # ОЧІКУЄМО ОПЛАТУ (1)
+# ID станів замовлення з DNTrade (порядок і ID задаються в налаштуваннях DNTrade)
+STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))        # Передплата (15)
+STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16))  # Передплата/Післясплата (16)
+STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1))  # Очікуємо оплату (1)
 
 HEADERS_DNTRADE = {
     "ApiKey": DNTRADE_TOKEN,
@@ -31,6 +29,73 @@ HEADERS_IBAN = {
     "Authorization": f"Bearer {IBAN_TOKEN}",
     "Content-Type": "application/json"
 }
+
+
+def calculate_order_total(order: dict) -> float:
+    """Отримує суму замовлення з поля total_price або підраховує по позиціях."""
+    if "total_price" in order and order["total_price"] is not None:
+        try:
+            return float(order["total_price"])
+        except (ValueError, TypeError):
+            pass
+
+    products = order.get("products", [])
+    total = 0.0
+    if isinstance(products, list):
+        for item in products:
+            try:
+                price = float(item.get("price", 0))
+                quantity = float(item.get("quantity", 1))
+                total += price * quantity
+            except (ValueError, TypeError):
+                continue
+    return round(total, 2)
+
+
+def create_full_iban_link(order_id: str, order_number: str | int, amount: float) -> str | None:
+    """Створює посилання на оплату через IBAN API."""
+    url = f"{IBAN_OPLATA_API_URL}/v1/payments/create"
+    payload = {
+        "order_id": str(order_id),
+        "amount": amount,
+        "description": f"Оплата за замовлення №{order_number or order_id}"
+    }
+    try:
+        response = requests.post(url, json=payload, headers=HEADERS_IBAN, timeout=10)
+        if response.status_code in (200, 201):
+            return response.json().get("payment_url")
+        logging.error(f"Помилка IBAN API: {response.text}")
+        return None
+    except Exception as e:
+        logging.error(f"Збій запиту до IBAN API: {e}")
+        return None
+
+
+def update_dntrade_order(order_external_id: str, order_number: str | int, payment_link: str) -> bool:
+    """Оновлює стан замовлення в DNTrade та додає посилання на оплату в примітку/коментар."""
+    url = f"{DNTRADE_API_URL}/orders/upload"
+
+    payload = {
+        "orders": [
+            {
+                "external_id": order_external_id,
+                "number": str(order_number),
+                "order_status": STATUS_WAITING_PAYMENT,
+                "note": f"Посилання на оплату: {payment_link}"
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=HEADERS_DNTRADE, timeout=10)
+        logging.info(f"Відповідь DNTrade orders/upload [{response.status_code}]: {response.text}")
+        if response.status_code in (200, 201):
+            logging.info(f"Замовлення №{order_number} успішно оновлено!")
+            return True
+        return False
+    except Exception as e:
+        logging.error(f"Виключення під час оновлення замовлення №{order_number}: {e}")
+        return False
 
 
 def run_pipeline():
@@ -53,19 +118,34 @@ def run_pipeline():
 
         logging.info(f"Отримано замовлень з DNTrade: {len(orders)}")
 
-        if orders:
-            first = orders[0]
-            # Виводимо ключі, які відповідають за стан та ID
-            logging.info("--- АНАЛІЗ ПОЛІВ DNTRADE ---")
-            logging.info(f"Ключі об'єкта: {list(first.keys())}")
-            logging.info(f"status: {first.get('status')}")
-            logging.info(f"state: {first.get('state')}")
-            logging.info(f"status_id / state_id: status_id={first.get('status_id')}, state_id={first.get('state_id')}")
-            logging.info(f"id / number / code: id={first.get('id')}, number={first.get('number')}, code={first.get('code')}")
-            logging.info(f"ПОВНИЙ JSON ПЕРШОГО ЗАМОВЛЕННЯ: {json.dumps(first, ensure_ascii=False)}")
+        target_statuses = (STATUS_PREPAY_FULL, STATUS_PREPAY_PARTIAL)
+        processed_count = 0
+
+        for order in orders:
+            order_status = order.get("order_status")
+            external_id = order.get("external_id")
+            number = order.get("number")
+
+            if order_status in target_statuses:
+                logging.info(f"Знайдено замовлення №{number} (ID: {external_id}) зі станом order_status={order_status}")
+
+                amount = calculate_order_total(order)
+                if amount <= 0:
+                    logging.warning(f"Замовлення №{number}: сума є 0 або від'ємна, пропускаємо.")
+                    continue
+
+                payment_link = create_full_iban_link(external_id, number, amount)
+                if payment_link:
+                    logging.info(f"Створено посилання для замовлення №{number}: {payment_link}")
+                    if update_dntrade_order(external_id, number, payment_link):
+                        processed_count += 1
+                else:
+                    logging.error(f"Не вдалося згенерувати посилання для замовлення №{number}")
+
+        logging.info(f"Опрацьовано замовлень у цій ітерації: {processed_count}")
 
     except Exception as e:
-        logging.error(f"Помилка під час запиту замовлень: {e}")
+        logging.error(f"Помилка під час виконання пайплайну: {e}")
         return
 
     logging.info("--- Обробку завершено ---")
