@@ -56,6 +56,7 @@ def get_iban_headers():
 def create_iban_payment_link(
     order_number: int | str, amount: float, description: str
 ) -> str | None:
+    """Генерація посилання на оплату через IBAN Oplata API"""
     url = f"{IBAN_OPLATA_API_URL}{IBAN_ENDPOINT}"
 
     payload = {
@@ -94,8 +95,13 @@ def update_dntrade_order_note(order_data: dict, payment_link: str) -> bool:
     """Запис посилання на оплату в поле note через /orders/upload"""
     url = f"{DNTRADE_API_URL}/orders/upload"
 
+    # Формуємо об'єкт із передачею нових даних примітки та збереженням основних полів
     updated_order = dict(order_data)
     updated_order["note"] = payment_link
+
+    # Переконуємося, що масив товарів заповнений
+    if "products" not in updated_order or updated_order["products"] is None:
+        updated_order["products"] = []
 
     payload = {"orders": [updated_order]}
 
@@ -104,28 +110,27 @@ def update_dntrade_order_note(order_data: dict, payment_link: str) -> bool:
             url, json=payload, headers=HEADERS_DNTRADE, timeout=10
         )
         logging.info(
-            f"[DNTrade Note] Status [{response.status_code}]: {response.text}"
+            f"[DNTrade Note Update] Status [{response.status_code}]: {response.text}"
         )
         return response.status_code in (200, 201)
     except Exception:
-        logging.exception("[DNTrade Note] Помилка запису note:")
+        logging.exception("[DNTrade Note Update] Помилка запису note:")
         return False
 
 
 def change_dntrade_order_status(
     order_id: str, new_status_id: int
 ) -> bool:
-    """Зміна статусу через /orders/setstatus"""
+    """Зміна статусу замовлення через /orders/setstatus"""
     url = f"{DNTRADE_API_URL}/orders/setstatus"
-    
-    # Використовуємо комбіноване навантаження для сумісності з різними версіями API
+
     payload = {
         "id": order_id,
         "external_id": order_id,
         "status_id": new_status_id,
         "status": new_status_id,
         "Status": new_status_id,
-        "Id": order_id
+        "Id": order_id,
     }
 
     try:
@@ -133,16 +138,17 @@ def change_dntrade_order_status(
             url, json=payload, headers=HEADERS_DNTRADE, timeout=10
         )
         logging.info(
-            f"[DNTrade Status] Status [{response.status_code}]: {response.text}"
+            f"[DNTrade Status Change] Status [{response.status_code}]: {response.text}"
         )
         return response.status_code in (200, 201)
     except Exception:
-        logging.exception("[DNTrade Status] Помилка зміни статусу:")
+        logging.exception("[DNTrade Status Change] Помилка зміни статусу:")
         return False
 
 
 @app.route("/cron/process", methods=["GET", "POST"])
 def process_dntrade_orders():
+    """Основна функція обробки замовлень"""
     try:
         params = {"limit": 50, "page": 1}
 
@@ -177,6 +183,7 @@ def process_dntrade_orders():
         for order in orders:
             order_status = order.get("order_status")
 
+            # Обробляємо тільки статуси 15 та 16
             if order_status not in (
                 STATUS_FULL_PREPAY,
                 STATUS_PARTIAL_PREPAY,
@@ -194,6 +201,7 @@ def process_dntrade_orders():
                 payment_amount = min(PREPAYMENT_PARTIAL_AMOUNT, total_price)
                 desc = f"Передплата за замовлення №{number}"
 
+            # 1. Створюємо посилання на оплату
             payment_link = create_iban_payment_link(
                 number, payment_amount, desc
             )
@@ -204,7 +212,10 @@ def process_dntrade_orders():
                 )
                 continue
 
+            # 2. Оновлюємо примітку (записуємо посилання)
             note_ok = update_dntrade_order_note(order, payment_link)
+
+            # 3. Змінюємо статус на 1 ("Очікує оплату")
             status_ok = change_dntrade_order_status(
                 external_id, STATUS_WAITING_PAYMENT
             )
