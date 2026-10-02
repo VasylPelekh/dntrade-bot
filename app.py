@@ -18,43 +18,50 @@ HEADERS_DNTRADE = {
 
 
 @app.route("/cron/process", methods=["GET", "POST"])
-def inspect_absolutely_latest_order():
+def inspect_last_page_order():
     try:
-        # Передаємо сортування від найновішого до найстарішого
-        params = {
-            "limit": 50,
-            "page": 1,
-            "sort": "date:desc",
-            "order_by": "id",
-            "order_dir": "desc"
-        }
+        page = 1
+        all_orders = []
 
-        response = requests.get(
-            f"{DNTRADE_API_URL}/orders/list",
-            headers=HEADERS_DNTRADE,
-            params=params,
-            timeout=10
-        )
+        # Проходимо по сторінках по 50 замовлень, поки вони є
+        while True:
+            response = requests.get(
+                f"{DNTRADE_API_URL}/orders/list",
+                headers=HEADERS_DNTRADE,
+                params={"limit": 50, "page": page},
+                timeout=10
+            )
 
-        if response.status_code != 200:
-            return jsonify({"error": response.text}), response.status_code
+            if response.status_code != 200:
+                break
 
-        data = response.json()
-        orders = data.get("data", []) if isinstance(data, dict) and "data" in data else (
-            data.get("orders", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-        )
+            data = response.json()
+            orders = data.get("data", []) if isinstance(data, dict) and "data" in data else (
+                data.get("orders", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            )
 
-        if not orders:
+            if not orders:
+                break
+
+            all_orders.extend(orders)
+
+            # Якщо повернулося менше 50, значить це була остання сторінка
+            if len(orders) < 50:
+                break
+
+            page += 1
+
+        if not all_orders:
             return jsonify({"message": "Замовлень не знайдено"}), 200
 
-        # Пошук замовлення з найбільшим номером
-        def extract_number(item):
+        # Знаходимо замовлення з максимальним номером серед усіх сторінок
+        def get_num(item):
             try:
                 return int(item.get("number", 0))
             except (ValueError, TypeError):
                 return 0
 
-        latest_order = max(orders, key=extract_number)
+        latest_order = max(all_orders, key=get_num)
 
         pretty_json = json.dumps(latest_order, ensure_ascii=False, indent=4)
         return Response(pretty_json, mimetype="application/json")
