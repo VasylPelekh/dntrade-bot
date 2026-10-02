@@ -20,11 +20,11 @@ HEADERS_DNTRADE = {
 @app.route("/cron/process", methods=["GET", "POST"])
 def inspect_single_order():
     try:
-        # Запитуємо РІВНО 1 ОСТАННЄ замовлення
+        # Запитуємо останні замовлення
         response = requests.get(
             f"{DNTRADE_API_URL}/orders/list",
             headers=HEADERS_DNTRADE,
-            params={"limit": 1, "sort": "-id"},
+            params={"limit": 50},
             timeout=10
         )
 
@@ -39,10 +39,16 @@ def inspect_single_order():
         if not orders:
             return jsonify({"message": "Замовлень не знайдено в CRM"}), 200
 
-        single_order = orders[0]
+        # Гарантовано сортуємо за id по спаданню (найновіше першим)
+        try:
+            sorted_orders = sorted(orders, key=lambda x: int(x.get("id", 0)), reverse=True)
+        except Exception:
+            sorted_orders = orders
 
-        # Формуємо красивий і читабельний JSON для виводу в браузер
-        pretty_json = json.dumps(single_order, ensure_ascii=False, indent=4)
+        latest_order = sorted_orders[0]
+
+        # Формуємо чистий і читабельний JSON для виводу в браузер
+        pretty_json = json.dumps(latest_order, ensure_ascii=False, indent=4)
         return Response(pretty_json, mimetype="application/json")
 
     except Exception as e:
