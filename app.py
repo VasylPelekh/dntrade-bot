@@ -10,13 +10,13 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-# --- Конфігурація DNTrade ---
+# --- Конфигурация DNTrade ---
 DNTRADE_API_URL = os.environ.get(
     "DNTRADE_API_URL", "https://api.dntrade.com.ua"
 ).rstrip("/")
 DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
 
-# --- Конфігурація IBAN Oplata ---
+# --- Конфигурация IBAN Oplata ---
 IBAN_OPLATA_API_URL = os.environ.get(
     "IBAN_OPLATA_API_URL", "https://api.ibanoplata.com"
 ).rstrip("/")
@@ -27,7 +27,7 @@ IBAN_ORGANIZATION_NAME = os.environ.get("IBAN_ORGANIZATION_NAME", "")
 IBAN_IDENTIFICATION_CODE = os.environ.get("IBAN_IDENTIFICATION_CODE", "")
 IBAN_ACCOUNT = os.environ.get("IBAN_ACCOUNT", "")
 
-# --- Статуси замовлень ---
+# --- Статусы заказов ---
 STATUS_FULL_PREPAY = int(os.environ.get("STATUS_PREPAY_FULL", 15))
 STATUS_PARTIAL_PREPAY = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16))
 STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1))
@@ -83,26 +83,26 @@ def create_iban_payment_link(
             data = response.json()
             return data.get("ibanInvoiceUrl") or data.get("url")
 
-        logging.error(f"[IBAN API] Помилка: {response.text}")
+        logging.error(f"[IBAN API] Ошибка: {response.text}")
         return None
     except Exception:
-        logging.exception("[IBAN API] Виключення при запиті:")
+        logging.exception("[IBAN API] Исключение при запросе:")
         return None
 
 
-def update_dntrade_order_note(order_id: str, number: int | str, payment_link: str) -> bool:
-    """Оновлення примітки замовлення в DNTrade"""
+def update_dntrade_order_note(order_data: dict, payment_link: str) -> bool:
+    """Обновление примечания заказа в DNTrade с сохранением товаров (cart)"""
     url = f"{DNTRADE_API_URL}/orders/upload"
 
-    payload = {
-        "orders": [
-            {
-                "id": order_id,
-                "number": number,
-                "note": payment_link
-            }
-        ]
-    }
+    # Создаем копию объекта заказа и обновляем примечание
+    updated_order = dict(order_data)
+    updated_order["note"] = payment_link
+
+    # Убедимся, что массив товаров (cart) присутствует
+    if "cart" not in updated_order or updated_order["cart"] is None:
+        updated_order["cart"] = []
+
+    payload = {"orders": [updated_order]}
 
     try:
         response = requests.post(
@@ -113,16 +113,19 @@ def update_dntrade_order_note(order_id: str, number: int | str, payment_link: st
         )
         return response.status_code in (200, 201)
     except Exception:
-        logging.exception("[DNTrade Note] Помилка запису note:")
+        logging.exception("[DNTrade Note] Ошибка записи note:")
         return False
 
 
 def change_dntrade_order_status(
-    order_id: str | int, new_status_id: int
+    order_id: str, new_status_id: int
 ) -> bool:
-    """Зміна статусу замовлення в DNTrade через POST /orders/setstatus"""
+    """Изменение статуса заказа в DNTrade с правильным регистром ключей ('Id' и 'Status')"""
     url = f"{DNTRADE_API_URL}/orders/setstatus"
-    payload = {"id": order_id, "status_id": new_status_id}
+    payload = {
+        "Id": order_id,
+        "Status": new_status_id
+    }
     try:
         response = requests.post(
             url, json=payload, headers=HEADERS_DNTRADE, timeout=10
@@ -132,7 +135,7 @@ def change_dntrade_order_status(
         )
         return response.status_code in (200, 201)
     except Exception:
-        logging.exception("[DNTrade Status] Помилка зміни статусу:")
+        logging.exception("[DNTrade Status] Ошибка смены статуса:")
         return False
 
 
@@ -151,7 +154,7 @@ def process_dntrade_orders():
         if response.status_code != 200:
             return (
                 jsonify(
-                    {"error": f"DNTrade API повернув помилку: {response.text}"}
+                    {"error": f"DNTrade API вернул ошибку: {response.text}"}
                 ),
                 response.status_code,
             )
@@ -178,7 +181,7 @@ def process_dntrade_orders():
             ):
                 continue
 
-            order_id = order.get("id")
+            order_id = order.get("id")  # Уникальный GUID заказа
             number = order.get("number")
             total_price = float(order.get("total_price", 0))
 
@@ -195,14 +198,14 @@ def process_dntrade_orders():
 
             if not payment_link:
                 logging.error(
-                    f"Не вдалося згенерувати посилання для замовлення №{number}"
+                    f"Не удалось сгенерировать ссылку для заказа №{number}"
                 )
                 continue
 
-            # Спроба оновити примітку
-            note_ok = update_dntrade_order_note(order_id, number, payment_link)
+            # Обновляем примечание, передавая весь объект заказа (включая cart)
+            note_ok = update_dntrade_order_note(order, payment_link)
 
-            # Переносимо в статус «Очікує оплати» (status_id = 1)
+            # Меняем статус с передачей "Id" и "Status"
             status_ok = change_dntrade_order_status(
                 order_id, STATUS_WAITING_PAYMENT
             )
@@ -210,6 +213,7 @@ def process_dntrade_orders():
             processed_orders.append(
                 {
                     "number": number,
+                    "order_id": order_id,
                     "order_status_before": order_status,
                     "amount": payment_amount,
                     "payment_link": payment_link,
@@ -230,7 +234,7 @@ def process_dntrade_orders():
         )
 
     except Exception as e:
-        logging.exception("Виключення під час обробки:")
+        logging.exception("Исключение при обработке:")
         return jsonify({"error": str(e)}), 500
 
 
