@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 
-# --- Перемінні середовища з Render ---
+# --- Змінні середовища ---
 DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua")
 DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
 
@@ -17,7 +17,7 @@ IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-# Звірені ID статусів з вашої CRM DNTrade:
+# Звірені ID статусів з DNTrade:
 # 2 = Передплата (Повна)
 # 3 = Передплата/Післясплата (Часткова)
 STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 2))
@@ -36,7 +36,6 @@ HEADERS_IBAN = {
 
 
 def calculate_order_total(order: dict) -> float:
-    """Обчислює загальну суму замовлення."""
     if "total_price" in order and order["total_price"] is not None:
         try:
             return float(order["total_price"])
@@ -57,7 +56,6 @@ def calculate_order_total(order: dict) -> float:
 
 
 def create_full_iban_link(order_id: str, order_number: str | int, amount: float) -> str | None:
-    """Генерує динамічне посилання на оплату всієї суми через IBAN API."""
     url = f"{IBAN_OPLATA_API_URL}/v1/payments/create"
     payload = {
         "order_id": str(order_id),
@@ -65,10 +63,11 @@ def create_full_iban_link(order_id: str, order_number: str | int, amount: float)
         "description": f"Оплата за замовлення №{order_number or order_id}"
     }
     try:
+        logging.info(f"Надсилаємо запит до IBAN API для замовлення №{order_number} на суму {amount} грн...")
         response = requests.post(url, json=payload, headers=HEADERS_IBAN, timeout=10)
+        logging.info(f"Відповідь IBAN API [{response.status_code}]: {response.text}")
         if response.status_code in (200, 201):
             return response.json().get("payment_url")
-        logging.error(f"Помилка IBAN API: {response.text}")
         return None
     except Exception as e:
         logging.error(f"Збій запиту до IBAN API: {e}")
@@ -76,7 +75,6 @@ def create_full_iban_link(order_id: str, order_number: str | int, amount: float)
 
 
 def update_dntrade_order(external_id: str, order_number: str | int, payment_link: str) -> bool:
-    """Записує посилання на оплату в примітку замовлення в DNTrade."""
     url = f"{DNTRADE_API_URL}/orders/upload"
 
     payload = {
@@ -91,6 +89,7 @@ def update_dntrade_order(external_id: str, order_number: str | int, payment_link
     }
 
     try:
+        logging.info(f"Відправляємо оновлення в DNTrade для №{order_number} з посиланням: {payment_link}")
         response = requests.post(url, json=payload, headers=HEADERS_DNTRADE, timeout=10)
         logging.info(f"Відповідь DNTrade orders/upload [{response.status_code}]: {response.text}")
         if response.status_code in (200, 201):
@@ -104,8 +103,11 @@ def update_dntrade_order(external_id: str, order_number: str | int, payment_link
 
 def run_pipeline():
     logging.info("--- Старт обробки замовлень ---")
+    
+    # Перевірка наявності ключів та посилань
+    logging.info(f"ПЕРЕВІРКА НАЛАШТУВАНЬ: LINK_200={LINK_200}, LINK_500={LINK_500}, IBAN_TOKEN={'Присутній' if IBAN_TOKEN else 'ВІДСУТНІЙ'}")
+
     try:
-        # Беремо останні 50 замовлень
         response = requests.get(
             f"{DNTRADE_API_URL}/orders/list",
             headers=HEADERS_DNTRADE,
@@ -134,26 +136,28 @@ def run_pipeline():
             except (ValueError, TypeError):
                 continue
 
-            # Фільтруємо лише замовлення зі статусами передплати (2 та 3)
             if order_status not in (STATUS_PREPAY_FULL, STATUS_PREPAY_PARTIAL):
                 continue
 
             logging.info(f"ЗНАЙДЕНО ЗБІГ! Замовлення №{number} (external_id: {external_id}), стан: {order_status}")
 
             total_sum = calculate_order_total(order)
+            logging.info(f"Загальна сума замовлення №{number}: {total_sum} грн")
+
             link_to_save = None
 
-            # 1. Повна передплата (ID = 2) -> Динамічне посилання IBAN
             if order_status == STATUS_PREPAY_FULL:
                 link_to_save = create_full_iban_link(external_id, number, total_sum)
-
-            # 2. Часткова передплата (ID = 3) -> Фіксоване посилання (200 або 500 грн)
             elif order_status == STATUS_PREPAY_PARTIAL:
                 link_to_save = LINK_200 if total_sum < 1500 else LINK_500
+                if not link_to_save:
+                    logging.warning(f"ПРОПУСК: LINK_200 або LINK_500 не задано у зміних середовища Render!")
 
             if link_to_save:
                 if update_dntrade_order(external_id, number, link_to_save):
                     processed_count += 1
+            else:
+                logging.warning(f"Замовлення №{number} пропущено, бо не вдалося отримати/згенерувати посилання на оплату.")
 
         logging.info(f"--- Обробку завершено. Опрацьовано замовлень: {processed_count} ---")
 
