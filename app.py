@@ -2,26 +2,31 @@ import os
 import json
 import logging
 import requests
-from flask import Flask, jsonify, Response
+from flask import Flask, jsonify
 
-# Налаштування детального логування
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 app = Flask(__name__)
 
-# --- Конфігурація змінних оточення ---
+# --- DNTrade configuration ---
 DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua").rstrip("/")
 DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
 
-# Базовий URL для IBAN Oplata
+# --- IBAN Oplata configuration ---
 IBAN_OPLATA_API_URL = os.environ.get("IBAN_OPLATA_API_URL", "https://api.ibanoplata.com").rstrip("/")
+IBAN_ENDPOINT = os.environ.get("IBAN_ENDPOINT", "/api/v1/invoices")  # Вкажіть точний роут зі Swagger
 IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 
-# Статичні фолбек-посилання з Render
+# Дані вашої організації для IBAN
+IBAN_ORGANIZATION_NAME = os.environ.get("IBAN_ORGANIZATION_NAME", "")
+IBAN_IDENTIFICATION_CODE = os.environ.get("IBAN_IDENTIFICATION_CODE", "")
+IBAN_ACCOUNT = os.environ.get("IBAN_ACCOUNT", "")
+
+# Фолбек-посилання з Render
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-# Статуси замовлень у DNTrade
+# Статуси DNTrade
 STATUS_FULL_PREPAY = int(os.environ.get("STATUS_PREPAY_FULL", 15))       # Передплата (100%)
 STATUS_PARTIAL_PREPAY = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16)) # Передплата + Післясплата
 STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1)) # Очікує оплату
@@ -40,64 +45,67 @@ HEADERS_IBAN = {
 }
 
 
-def extract_url_from_response(data: dict) -> str | None:
-    """Витягує посилання на оплату з будь-якого формату відповіді IBAN API"""
-    if not isinstance(data, dict):
-        return None
+def extract_url_from_response(data: dict | str) -> str | None:
+    """Витягує посилання на оплату з відповіді API IBAN Oplata"""
+    if isinstance(data, str) and data.startswith("http"):
+        return data
 
-    # Прямі поля в корені об'єкта
-    for key in ["page_url", "url", "link", "payment_url", "short_url", "checkout_url", "invoice_url"]:
-        if data.get(key) and isinstance(data[key], str):
-            return data[key]
+    if isinstance(data, dict):
+        for key in ["page_url", "url", "link", "payment_url", "short_url", "checkout_url", "ibanInvoiceId"]:
+            val = data.get(key)
+            if val and isinstance(val, str) and val.startswith("http"):
+                return val
 
-    # Якщо об'єкт загорнутий у "data" або "result"
-    nested = data.get("data") or data.get("result")
-    if isinstance(nested, dict):
-        for key in ["page_url", "url", "link", "payment_url", "short_url", "checkout_url", "invoice_url"]:
-            if nested.get(key) and isinstance(nested[key], str):
-                return nested[key]
+        nested = data.get("data") or data.get("result")
+        if isinstance(nested, dict):
+            for key in ["page_url", "url", "link", "payment_url", "short_url", "checkout_url"]:
+                val = nested.get(key)
+                if val and isinstance(val, str) and val.startswith("http"):
+                    return val
 
     return None
 
 
 def create_iban_payment_link(order_number: int | str, amount: float, description: str) -> str | None:
-    """
-    Автоматично пробує кілька стандартних эндпоінтів IBAN Oplata API.
-    Якщо жоден не спрацьовує — повертає фолбек-посилання LINK_200 / LINK_500.
-    """
+    """Генерація посилання на оплату відповідно до точної специфікації Swagger IBAN Oplata"""
     if IBAN_TOKEN:
+        # Формуємо шлях запиту
+        endpoint_path = IBAN_ENDPOINT if IBAN_ENDPOINT.startswith("/") else f"/{IBAN_ENDPOINT}"
+        url = f"{IBAN_OPLATA_API_URL}{endpoint_path}"
+
+        # ТОЧНЕ ТІЛО ЗАПИТУ ЗІ СВАТГЕРА
         payload = {
+            "organizationName": IBAN_ORGANIZATION_NAME,
+            "identificationCode": IBAN_IDENTIFICATION_CODE,
+            "iban": IBAN_ACCOUNT,
             "amount": round(amount, 2),
-            "order_id": str(order_number),
-            "description": description
+            "paymentPurpose": description,
+            "notes": f"Замовлення №{order_number}",
+            "clientNotes": f"Оплата замовлення №{order_number}",
+            "expirationHours": 24
         }
 
-        # Список потенційних ш шляхів API у Swagger/IBAN oplata
-        endpoints = [
-            f"{IBAN_OPLATA_API_URL}/invoices",
-            f"{IBAN_OPLATA_API_URL}/links",
-            f"{IBAN_OPLATA_API_URL}/payment-links",
-            f"{IBAN_OPLATA_API_URL}/api/v1/invoices",
-            f"{IBAN_OPLATA_API_URL}/api/v1/links"
-        ]
+        try:
+            logging.info(f"[IBAN API] POST {url} | Payload: {payload}")
+            response = requests.post(url, json=payload, headers=HEADERS_IBAN, timeout=10)
+            logging.info(f"[IBAN API] Status: {response.status_code} | Response: {response.text}")
 
-        for endpoint in endpoints:
-            try:
-                logging.info(f"[IBAN API] Надсилаємо POST {endpoint} з даними: {payload}")
-                response = requests.post(endpoint, json=payload, headers=HEADERS_IBAN, timeout=10)
-                logging.info(f"[IBAN API] Status: {response.status_code}, Response: {response.text}")
+            if response.status_code in (200, 201):
+                try:
+                    res_data = response.json()
+                except Exception:
+                    res_data = response.text
 
-                if response.status_code in (200, 201):
-                    res_json = response.json()
-                    payment_link = extract_url_from_response(res_json)
-                    if payment_link:
-                        logging.info(f"[IBAN API] Успішно отримано посилання: {payment_link}")
-                        return payment_link
-            except Exception as e:
-                logging.error(f"[IBAN API] Виключення при зверненні до {endpoint}: {e}")
+                payment_link = extract_url_from_response(res_data)
+                if payment_link:
+                    return payment_link
+                else:
+                    logging.warning(f"[IBAN API] Не вдалося знайти URL у відповіді: {res_data}")
 
-    # Фолбек на готові статичні посилання з Render, якщо API не вдалося
-    logging.warning("[IBAN API] Автоматична генерація через API не повернула URL. Перевіряємо фолбек-посилання.")
+        except Exception as e:
+            logging.error(f"[IBAN API] Виключення при запиті: {e}")
+
+    # Фолбек на готові лінки, якщо API повернуло помилку
     if amount == 200.0 and LINK_200:
         return LINK_200
     if amount == 500.0 and LINK_500:
@@ -107,7 +115,7 @@ def create_iban_payment_link(order_number: int | str, amount: float, description
 
 
 def update_dntrade_order_note(external_id: str, number: int | str, payment_link: str) -> bool:
-    """Записує посилання в поле 'note' замовлення через /orders/upload"""
+    """Оновлення примітки (note) у DNTrade"""
     url = f"{DNTRADE_API_URL}/orders/upload"
     payload = {
         "orders": [
@@ -120,7 +128,7 @@ def update_dntrade_order_note(external_id: str, number: int | str, payment_link:
     }
     try:
         response = requests.post(url, json=payload, headers=HEADERS_DNTRADE, timeout=10)
-        logging.info(f"[DNTrade Note] Response [{response.status_code}]: {response.text}")
+        logging.info(f"[DNTrade Note] Status [{response.status_code}]: {response.text}")
         return response.status_code in (200, 201)
     except Exception as e:
         logging.error(f"[DNTrade Note] Помилка запису note: {e}")
@@ -128,7 +136,7 @@ def update_dntrade_order_note(external_id: str, number: int | str, payment_link:
 
 
 def change_dntrade_order_status(order_id: str | int, new_status_id: int) -> bool:
-    """Змінює статус замовлення в DNTrade через /orders/setstatus"""
+    """Зміна статусу замовлення в DNTrade"""
     url = f"{DNTRADE_API_URL}/orders/setstatus"
     payload = {
         "id": order_id,
@@ -136,7 +144,7 @@ def change_dntrade_order_status(order_id: str | int, new_status_id: int) -> bool
     }
     try:
         response = requests.post(url, json=payload, headers=HEADERS_DNTRADE, timeout=10)
-        logging.info(f"[DNTrade Status] Response [{response.status_code}]: {response.text}")
+        logging.info(f"[DNTrade Status] Status [{response.status_code}]: {response.text}")
         return response.status_code in (200, 201)
     except Exception as e:
         logging.error(f"[DNTrade Status] Помилка зміни статусу: {e}")
@@ -145,7 +153,6 @@ def change_dntrade_order_status(order_id: str | int, new_status_id: int) -> bool
 
 @app.route("/cron/process", methods=["GET", "POST"])
 def process_dntrade_orders():
-    """Головний маршрут для сканування нових замовлень DNTrade"""
     try:
         params = {"limit": 50, "page": 1}
         
@@ -169,7 +176,6 @@ def process_dntrade_orders():
         for order in orders:
             order_status = order.get("order_status")
             
-            # Працюємо тільки із замовленнями в статусах 15 та 16
             if order_status not in (STATUS_FULL_PREPAY, STATUS_PARTIAL_PREPAY):
                 continue
 
@@ -180,22 +186,19 @@ def process_dntrade_orders():
 
             if order_status == STATUS_FULL_PREPAY:
                 payment_amount = total_price
-                desc = f"Повна оплата замовлення №{number}"
+                desc = f"Оплата замовлення №{number}"
             else:
                 payment_amount = min(PREPAYMENT_PARTIAL_AMOUNT, total_price)
                 desc = f"Передплата за замовлення №{number}"
 
-            # 1. Генерація/отримання посилання
             payment_link = create_iban_payment_link(number, payment_amount, desc)
             
             if not payment_link:
-                logging.error(f"Не вдалося згенерувати або знайти посилання для замовлення №{number}")
+                logging.error(f"Не вдалося отримати посилання для замовлення №{number}")
                 continue
 
-            # 2. Оновлення примітки (note) в DNTrade
             note_ok = update_dntrade_order_note(external_id, number, payment_link)
 
-            # 3. Переведення замовлення в статус "Очікує оплату" (1)
             status_ok = False
             if note_ok:
                 status_ok = change_dntrade_order_status(order_id, STATUS_WAITING_PAYMENT)
