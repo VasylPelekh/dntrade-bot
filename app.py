@@ -17,7 +17,7 @@ IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-# ID станів замовлення з DNTrade (за замовчуванням 15 та 16)
+# ID станів замовлення з DNTrade
 STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))        # Передплата
 STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16))  # Передплата/Післясплата
 STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1))  # Очікуємо оплату
@@ -100,11 +100,11 @@ def update_dntrade_order(external_id: str, order_number: str | int, payment_link
 def run_pipeline():
     logging.info("--- Старт обробки замовлень ---")
     try:
-        # Запитуємо замовлення
+        # Берімо ОСТАННІ 50 замовлень (сорт за спаданням ID)
         response = requests.get(
             f"{DNTRADE_API_URL}/orders/list",
             headers=HEADERS_DNTRADE,
-            params={"limit": 300},
+            params={"limit": 50, "sort": "-id"},
             timeout=10
         )
         if response.status_code != 200:
@@ -116,12 +116,11 @@ def run_pipeline():
             data.get("orders", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
         )
 
-        target_numbers = ["221", "222", "223", 221, 222, 223]
-        target_orders = [o for o in orders if o.get("number") in target_numbers or str(o.get("number")) in ["221", "222", "223"]]
+        logging.info(f"Отримано останніх замовлень з DNTrade: {len(orders)}")
 
-        logging.info(f"--- ДЕТАЛІ ДЛЯ ЗАМОВЛЕНЬ 221, 222, 223 (Знайдено: {len(target_orders)}) ---")
-        for t_order in target_orders:
-            logging.info(f"Замовлення №{t_order.get('number')}: order_status={t_order.get('order_status')}, status={t_order.get('status')}, external_id={t_order.get('external_id')}, id={t_order.get('id')}")
+        # Виводимо номери та статуси найновіших замовлень для перевірки
+        recent_info = [(o.get("number"), o.get("order_status"), o.get("status")) for o in orders[:10]]
+        logging.info(f"Останні 10 замовлень (Номер, order_status, status): {recent_info}")
 
         processed_count = 0
 
