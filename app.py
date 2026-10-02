@@ -41,11 +41,17 @@ HEADERS_DNTRADE = {
     "Content-Type": "application/json",
 }
 
-HEADERS_IBAN = {
-    "Authorization": f"Bearer {IBAN_TOKEN}",
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-}
+
+def get_iban_headers():
+    """Формування заголовків для IBAN Oplata API (X-API-KEY / ApiKey)"""
+    token = (IBAN_TOKEN or "").strip()
+    return {
+        "X-API-KEY": token,
+        "ApiKey": token,
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
 
 
 def create_iban_payment_link(
@@ -66,17 +72,18 @@ def create_iban_payment_link(
     }
 
     try:
+        headers = get_iban_headers()
         logging.info(f"[IBAN API] POST {url} | Payload: {payload}")
         response = requests.post(
-            url, json=payload, headers=HEADERS_IBAN, timeout=10
+            url, json=payload, headers=headers, timeout=10
         )
         logging.info(
             f"[IBAN API] Status: {response.status_code} | Response: {response.text}"
         )
 
-        if response.status_code == 200:
+        if response.status_code in (200, 201):
             data = response.json()
-            return data.get("ibanInvoiceUrl")
+            return data.get("ibanInvoiceUrl") or data.get("url")
 
         logging.error(f"[IBAN API] Помилка: {response.text}")
         return None
