@@ -56,7 +56,6 @@ def get_iban_headers():
 def create_iban_payment_link(
     order_number: int | str, amount: float, description: str
 ) -> str | None:
-    """Генерація посилання на оплату через IBAN API"""
     url = f"{IBAN_OPLATA_API_URL}{IBAN_ENDPOINT}"
 
     payload = {
@@ -92,15 +91,11 @@ def create_iban_payment_link(
 
 
 def update_dntrade_order_note(order_data: dict, payment_link: str) -> bool:
-    """Оновлення поля note у замовленні через POST /orders/upload"""
+    """Запис посилання на оплату в поле note через /orders/upload"""
     url = f"{DNTRADE_API_URL}/orders/upload"
 
     updated_order = dict(order_data)
     updated_order["note"] = payment_link
-
-    # Упевнимося, що структура містить товари (products)
-    if "products" not in updated_order or updated_order["products"] is None:
-        updated_order["products"] = []
 
     payload = {"orders": [updated_order]}
 
@@ -118,16 +113,19 @@ def update_dntrade_order_note(order_data: dict, payment_link: str) -> bool:
 
 
 def change_dntrade_order_status(
-    external_id: str, order_number: int | str, new_status_id: int
+    order_id: str, new_status_id: int
 ) -> bool:
-    """Зміна статусу замовлення в DNTrade через POST /orders/setstatus"""
+    """Зміна статусу через /orders/setstatus"""
     url = f"{DNTRADE_API_URL}/orders/setstatus"
-
+    
+    # Використовуємо комбіноване навантаження для сумісності з різними версіями API
     payload = {
-        "external_id": external_id,
-        "number": order_number,
+        "id": order_id,
+        "external_id": order_id,
         "status_id": new_status_id,
-        "Status": new_status_id
+        "status": new_status_id,
+        "Status": new_status_id,
+        "Id": order_id
     }
 
     try:
@@ -145,7 +143,6 @@ def change_dntrade_order_status(
 
 @app.route("/cron/process", methods=["GET", "POST"])
 def process_dntrade_orders():
-    """Основний маршрут для сканування та обробки замовлень"""
     try:
         params = {"limit": 50, "page": 1}
 
@@ -180,7 +177,6 @@ def process_dntrade_orders():
         for order in orders:
             order_status = order.get("order_status")
 
-            # Фільтруємо лише потрібні статуси (15 або 16)
             if order_status not in (
                 STATUS_FULL_PREPAY,
                 STATUS_PARTIAL_PREPAY,
@@ -208,12 +204,9 @@ def process_dntrade_orders():
                 )
                 continue
 
-            # 1. Записуємо посилання у поле note
             note_ok = update_dntrade_order_note(order, payment_link)
-
-            # 2. Змінюємо статус замовлення на 1 ("Очікує оплати")
             status_ok = change_dntrade_order_status(
-                external_id, number, STATUS_WAITING_PAYMENT
+                external_id, STATUS_WAITING_PAYMENT
             )
 
             processed_orders.append(
