@@ -20,11 +20,19 @@ HEADERS_DNTRADE = {
 @app.route("/cron/process", methods=["GET", "POST"])
 def inspect_absolutely_latest_order():
     try:
-        # 1. Запитуємо першу сторінку з дозволеним limit = 50
+        # Передаємо сортування від найновішого до найстарішого
+        params = {
+            "limit": 50,
+            "page": 1,
+            "sort": "date:desc",
+            "order_by": "id",
+            "order_dir": "desc"
+        }
+
         response = requests.get(
             f"{DNTRADE_API_URL}/orders/list",
             headers=HEADERS_DNTRADE,
-            params={"limit": 50, "page": 1},
+            params=params,
             timeout=10
         )
 
@@ -36,30 +44,10 @@ def inspect_absolutely_latest_order():
             data.get("orders", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
         )
 
-        # Перевіряємо кількість сторінок
-        total_pages = 1
-        if isinstance(data, dict):
-            meta = data.get("meta") or data.get("pagination") or {}
-            total_pages = meta.get("last_page") or meta.get("total_pages") or 1
-
-        # Якщо сторінок більше ніж одна — отримуємо найостаннішу сторінку
-        if total_pages > 1:
-            last_resp = requests.get(
-                f"{DNTRADE_API_URL}/orders/list",
-                headers=HEADERS_DNTRADE,
-                params={"limit": 50, "page": total_pages},
-                timeout=10
-            )
-            if last_resp.status_code == 200:
-                last_data = last_resp.json()
-                orders = last_data.get("data", []) if isinstance(last_data, dict) and "data" in last_data else (
-                    last_data.get("orders", []) if isinstance(last_data, dict) else (last_data if isinstance(last_data, list) else [])
-                )
-
         if not orders:
             return jsonify({"message": "Замовлень не знайдено"}), 200
 
-        # Знаходимо замовлення з найбільшим номером серед отриманих
+        # Пошук замовлення з найбільшим номером
         def extract_number(item):
             try:
                 return int(item.get("number", 0))
@@ -68,7 +56,6 @@ def inspect_absolutely_latest_order():
 
         latest_order = max(orders, key=extract_number)
 
-        # Виводимо чистий JSON у браузер
         pretty_json = json.dumps(latest_order, ensure_ascii=False, indent=4)
         return Response(pretty_json, mimetype="application/json")
 
