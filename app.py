@@ -1,8 +1,7 @@
-import json
 import logging
 import os
+from collections import Counter
 from decimal import Decimal, InvalidOperation
-from typing import Any, Optional
 
 import requests
 from flask import Flask, jsonify, request
@@ -12,45 +11,26 @@ from flask import Flask, jsonify, request
 # LOGGING
 # ============================================================
 
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
-
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-logger = logging.getLogger("dntrade-iban")
-
-
-# ============================================================
-# FLASK
-# ============================================================
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 
 # ============================================================
-# CONFIGURATION
+# ENVIRONMENT
 # ============================================================
-
-# ----------------------------
-# DNTrade
-# ----------------------------
 
 DNTRADE_API_URL = os.environ.get(
     "DNTRADE_API_URL",
     "https://api.dntrade.com.ua",
 ).rstrip("/")
 
-DNTRADE_TOKEN = os.environ.get(
-    "DNTRADE_TOKEN",
-    "",
-).strip()
-
-
-# ----------------------------
-# IBAN Oplata
-# ----------------------------
+DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN", "").strip()
 
 IBAN_OPLATA_API_URL = os.environ.get(
     "IBAN_OPLATA_API_URL",
@@ -60,12 +40,9 @@ IBAN_OPLATA_API_URL = os.environ.get(
 IBAN_ENDPOINT = os.environ.get(
     "IBAN_ENDPOINT",
     "/v2/iban-invoice",
-).strip()
+)
 
-IBAN_TOKEN = os.environ.get(
-    "IBAN_TOKEN",
-    "",
-).strip()
+IBAN_TOKEN = os.environ.get("IBAN_TOKEN", "").strip()
 
 IBAN_ORGANIZATION_NAME = os.environ.get(
     "IBAN_ORGANIZATION_NAME",
@@ -82,112 +59,55 @@ IBAN_ACCOUNT = os.environ.get(
     "",
 )
 
-
-# ----------------------------
-# Order statuses
-# ----------------------------
-
+# Статуси DNTrade
 STATUS_FULL_PREPAY = int(
-    os.environ.get(
-        "STATUS_PREPAY_FULL",
-        "15",
-    )
+    os.environ.get("STATUS_PREPAY_FULL", "15")
 )
 
 STATUS_PARTIAL_PREPAY = int(
-    os.environ.get(
-        "STATUS_PREPAY_PARTIAL",
-        "16",
-    )
+    os.environ.get("STATUS_PREPAY_PARTIAL", "16")
 )
 
 STATUS_WAITING_PAYMENT = int(
-    os.environ.get(
-        "STATUS_WAITING_PAYMENT",
-        "1",
-    )
+    os.environ.get("STATUS_WAITING_PAYMENT", "1")
 )
 
-
-# ----------------------------
-# Partial prepayment
-# ----------------------------
-
-try:
-    PREPAYMENT_PARTIAL_AMOUNT = Decimal(
-        os.environ.get(
-            "PREPAYMENT_PARTIAL_AMOUNT",
-            "200",
-        )
-    )
-except InvalidOperation:
-    PREPAYMENT_PARTIAL_AMOUNT = Decimal("200")
-
-
-# ----------------------------
-# HTTP
-# ----------------------------
-
-CONNECT_TIMEOUT = int(
-    os.environ.get(
-        "CONNECT_TIMEOUT",
-        "10",
-    )
+# Фіксована передплата для статусу 16
+PREPAYMENT_PARTIAL_AMOUNT = Decimal(
+    os.environ.get("PREPAYMENT_PARTIAL_AMOUNT", "200")
 )
 
-READ_TIMEOUT = int(
-    os.environ.get(
-        "READ_TIMEOUT",
-        "30",
-    )
+# Скільки замовлень брати за один запит
+DNTRADE_PAGE_SIZE = int(
+    os.environ.get("DNTRADE_PAGE_SIZE", "100")
 )
 
-REQUEST_TIMEOUT = (
-    CONNECT_TIMEOUT,
-    READ_TIMEOUT,
+# Максимальна кількість сторінок
+DNTRADE_MAX_PAGES = int(
+    os.environ.get("DNTRADE_MAX_PAGES", "100")
 )
 
+REQUEST_TIMEOUT = int(
+    os.environ.get("REQUEST_TIMEOUT", "20")
+)
 
-# ----------------------------
-# Optional cron protection
-# ----------------------------
-
-CRON_SECRET = os.environ.get(
-    "CRON_SECRET",
-    "",
-).strip()
+# Якщо CRON_SECRET порожній — захист вимкнений.
+CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()
 
 
 # ============================================================
 # HEADERS
 # ============================================================
 
-def get_dntrade_headers() -> dict:
-    """
-    Заголовки DNTrade.
-
-    DNTrade використовує ApiKey.
-    """
-
-    headers = {
+def get_dntrade_headers():
+    return {
+        "ApiKey": DNTRADE_TOKEN,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
 
-    if DNTRADE_TOKEN:
-        headers["ApiKey"] = DNTRADE_TOKEN
 
-    return headers
-
-
-def get_iban_headers() -> dict:
-    """
-    Заголовки IBAN Oplata.
-
-    Зберігаємо кілька варіантів авторизації,
-    які використовувалися вашим робочим кодом.
-    """
-
+def get_iban_headers():
     token = IBAN_TOKEN
 
     return {
@@ -200,122 +120,238 @@ def get_iban_headers() -> dict:
 
 
 # ============================================================
-# GENERAL HTTP HELPERS
+# HELPERS
 # ============================================================
 
-def safe_response_text(
-    response: requests.Response,
-    max_length: int = 10000,
-) -> str:
+def decimal_value(value, default=Decimal("0")):
     """
-    Безпечне отримання response body для логів.
+    Безпечно перетворює значення грошей у Decimal.
     """
-
-    try:
-        text = response.text
-    except Exception:
-        return "<unable to read response body>"
-
-    if len(text) > max_length:
-        return text[:max_length] + " ... [TRUNCATED]"
-
-    return text
-
-
-def log_http_response(
-    prefix: str,
-    response: requests.Response,
-) -> None:
-    """
-    Детальне логування HTTP-відповіді.
-    """
-
-    logger.info(
-        "%s HTTP %s",
-        prefix,
-        response.status_code,
-    )
-
-    logger.info(
-        "%s Response body: %s",
-        prefix,
-        safe_response_text(response),
-    )
-
-
-# ============================================================
-# MONEY
-# ============================================================
-
-def parse_money(value: Any) -> Decimal:
-    """
-    Перетворення значення в Decimal.
-
-    Не використовуємо float для грошей.
-    """
-
     if value is None:
-        raise ValueError(
-            "Money value is None"
-        )
+        return default
 
     try:
-        amount = Decimal(
-            str(value).replace(",", ".").strip()
-        )
-    except (InvalidOperation, ValueError) as exc:
-        raise ValueError(
-            f"Invalid money value: {value!r}"
-        ) from exc
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
 
-    return amount.quantize(
-        Decimal("0.01")
-    )
+
+def normalize_status(value):
+    """
+    Перетворює order_status у int, якщо це можливо.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def extract_orders_from_response(data):
+    """
+    Витягує список замовлень із різних можливих форматів відповіді DNTrade.
+    """
+
+    if isinstance(data, list):
+        return data
+
+    if not isinstance(data, dict):
+        return []
+
+    possible_keys = [
+        "data",
+        "orders",
+        "items",
+        "results",
+    ]
+
+    for key in possible_keys:
+        value = data.get(key)
+
+        if isinstance(value, list):
+            return value
+
+        # Іноді data може бути об'єктом:
+        if isinstance(value, dict):
+            for nested_key in possible_keys:
+                nested_value = value.get(nested_key)
+
+                if isinstance(nested_value, list):
+                    return nested_value
+
+    return []
 
 
 # ============================================================
-# IBAN OPLATA
+# CRON AUTH
+# ============================================================
+
+def check_cron_secret():
+    """
+    Якщо CRON_SECRET заданий — вимагаємо його в query/header.
+    Якщо CRON_SECRET не заданий — доступ дозволений.
+    """
+
+    if not CRON_SECRET:
+        return True
+
+    supplied_secret = (
+        request.args.get("secret")
+        or request.headers.get("X-Cron-Secret")
+        or request.headers.get("Authorization", "")
+    )
+
+    if supplied_secret.startswith("Bearer "):
+        supplied_secret = supplied_secret[7:]
+
+    return supplied_secret == CRON_SECRET
+
+
+# ============================================================
+# DNTRADE: GET ORDERS
+# ============================================================
+
+def get_dntrade_orders():
+    """
+    Отримує всі доступні замовлення через pagination.
+
+    ВАЖЛИВО:
+    Тут навмисно НЕ підставляємо статус 15/16 у параметри,
+    тому що ми ще не знаємо точного синтаксису фільтра DNTrade.
+
+    Спочатку дивимося реальні статуси, які повертає API.
+    """
+
+    all_orders = []
+
+    page = 1
+
+    while page <= DNTRADE_MAX_PAGES:
+
+        url = f"{DNTRADE_API_URL}/orders/list"
+
+        params = {
+            "limit": DNTRADE_PAGE_SIZE,
+            "page": page,
+        }
+
+        logger.info(
+            "[DNTrade LIST] GET %s | params=%s",
+            url,
+            params,
+        )
+
+        try:
+            response = requests.get(
+                url,
+                headers=get_dntrade_headers(),
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except Exception:
+            logger.exception(
+                "[DNTrade LIST] Помилка HTTP запиту"
+            )
+            raise
+
+        logger.info(
+            "[DNTrade LIST] HTTP %s",
+            response.status_code,
+        )
+
+        logger.info(
+            "[DNTrade LIST] Response: %s",
+            response.text[:10000],
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                "DNTrade /orders/list повернув "
+                f"HTTP {response.status_code}: "
+                f"{response.text}"
+            )
+
+        try:
+            data = response.json()
+        except Exception:
+            raise RuntimeError(
+                "DNTrade /orders/list повернув не JSON: "
+                + response.text
+            )
+
+        orders = extract_orders_from_response(data)
+
+        logger.info(
+            "[DNTrade LIST] Page %s: отримано %s замовлень",
+            page,
+            len(orders),
+        )
+
+        if not orders:
+            break
+
+        all_orders.extend(orders)
+
+        # Якщо повернуло менше page size — це остання сторінка.
+        if len(orders) < DNTRADE_PAGE_SIZE:
+            break
+
+        page += 1
+
+    logger.info(
+        "[DNTrade LIST] Всього отримано замовлень: %s",
+        len(all_orders),
+    )
+
+    return all_orders
+
+
+# ============================================================
+# DNTRADE: PRINT STATUS STATISTICS
+# ============================================================
+
+def get_status_statistics(orders):
+    counter = Counter()
+
+    for order in orders:
+
+        if not isinstance(order, dict):
+            counter["INVALID_ORDER"] += 1
+            continue
+
+        raw_status = order.get("order_status")
+
+        normalized = normalize_status(raw_status)
+
+        counter[str(normalized)] += 1
+
+    return dict(counter)
+
+
+# ============================================================
+# IBAN: CREATE PAYMENT LINK
 # ============================================================
 
 def create_iban_payment_link(
-    order_number: Any,
-    amount: Decimal,
-    description: str,
-) -> Optional[str]:
+    order_number,
+    amount,
+    description,
+):
     """
-    Створює рахунок IBAN.
-
-    Повертає payment URL або None.
+    Створює платіжне посилання IBAN Oplata.
     """
 
-    url = (
-        f"{IBAN_OPLATA_API_URL}"
-        f"{IBAN_ENDPOINT}"
-    )
+    url = f"{IBAN_OPLATA_API_URL}{IBAN_ENDPOINT}"
 
-    amount = amount.quantize(
-        Decimal("0.01")
-    )
+    amount = decimal_value(amount)
 
     payload = {
         "organizationName": IBAN_ORGANIZATION_NAME,
         "identificationCode": IBAN_IDENTIFICATION_CODE,
         "iban": IBAN_ACCOUNT,
-
-        # Передаємо число, а не float,
-        # щоб не отримати 199.999999...
-        "amount": float(amount),
-
+        "amount": float(amount.quantize(Decimal("0.01"))),
         "paymentPurpose": description,
-
-        "notes": (
-            f"Замовлення №{order_number}"
-        ),
-
-        "clientNotes": (
-            f"Оплата замовлення №{order_number}"
-        ),
-
+        "notes": f"Замовлення №{order_number}",
+        "clientNotes": f"Оплата замовлення №{order_number}",
         "expirationHours": 24,
     }
 
@@ -325,18 +361,8 @@ def create_iban_payment_link(
     )
 
     logger.info(
-        "[IBAN] Order=%s amount=%s",
-        order_number,
-        amount,
-    )
-
-    logger.info(
-        "[IBAN] Payload=%s",
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            default=str,
-        ),
+        "[IBAN] Payload: %s",
+        payload,
     )
 
     try:
@@ -346,66 +372,36 @@ def create_iban_payment_link(
             headers=get_iban_headers(),
             timeout=REQUEST_TIMEOUT,
         )
-
-        log_http_response(
-            "[IBAN]",
-            response,
-        )
-
-    except requests.Timeout:
-        logger.exception(
-            "[IBAN] Timeout для order=%s",
-            order_number,
-        )
-        return None
-
-    except requests.RequestException:
-        logger.exception(
-            "[IBAN] HTTP exception для order=%s",
-            order_number,
-        )
-        return None
-
     except Exception:
         logger.exception(
-            "[IBAN] Unknown exception для order=%s",
-            order_number,
+            "[IBAN] Помилка HTTP запиту"
         )
         return None
 
-    if response.status_code not in (
-        200,
-        201,
-    ):
+    logger.info(
+        "[IBAN] HTTP %s",
+        response.status_code,
+    )
+
+    logger.info(
+        "[IBAN] Response: %s",
+        response.text[:10000],
+    )
+
+    if response.status_code not in (200, 201):
         logger.error(
-            "[IBAN] API error: HTTP %s | %s",
+            "[IBAN] Не вдалося створити рахунок. "
+            "HTTP %s",
             response.status_code,
-            safe_response_text(response),
         )
         return None
 
     try:
         data = response.json()
-    except ValueError:
+    except Exception:
         logger.error(
-            "[IBAN] API повернув не JSON: %s",
-            safe_response_text(response),
-        )
-        return None
-
-    logger.info(
-        "[IBAN] Parsed response=%s",
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            default=str,
-        ),
-    )
-
-    if not isinstance(data, dict):
-        logger.error(
-            "[IBAN] Unexpected response type: %s",
-            type(data).__name__,
+            "[IBAN] Відповідь не є JSON: %s",
+            response.text,
         )
         return None
 
@@ -413,199 +409,62 @@ def create_iban_payment_link(
         data.get("ibanInvoiceUrl")
         or data.get("url")
         or data.get("paymentUrl")
-        or data.get("payment_url")
+        or data.get("invoiceUrl")
     )
 
     if not payment_link:
         logger.error(
-            "[IBAN] Рахунок створено, але URL "
-            "не знайдений у відповіді."
-        )
-
-        logger.error(
-            "[IBAN] Response=%s",
+            "[IBAN] У відповіді немає URL оплати. "
+            "JSON: %s",
             data,
         )
-
         return None
 
     logger.info(
-        "[IBAN] SUCCESS order=%s URL=%s",
-        order_number,
+        "[IBAN] Посилання створено: %s",
         payment_link,
     )
 
-    return str(payment_link)
+    return payment_link
 
 
 # ============================================================
-# DNTRADE - SET STATUS
-# ============================================================
-
-def change_dntrade_order_status(
-    external_id: str,
-    new_status_id: int,
-) -> bool:
-    """
-    Зміна статусу через /orders/setstatus.
-
-    external_id — GUID замовлення.
-
-    У вашій поточній інтеграції саме цей запит уже працює,
-    тому залишаємо формат id/external_id + status_id/status.
-    """
-
-    url = (
-        f"{DNTRADE_API_URL}"
-        f"/orders/setstatus"
-    )
-
-    if not external_id:
-        logger.error(
-            "[DNTrade Status] external_id порожній"
-        )
-        return False
-
-    payload = {
-        "id": external_id,
-        "external_id": external_id,
-        "status_id": new_status_id,
-        "status": new_status_id,
-    }
-
-    logger.info(
-        "[DNTrade Status] POST %s",
-        url,
-    )
-
-    logger.info(
-        "[DNTrade Status] external_id=%s new_status=%s",
-        external_id,
-        new_status_id,
-    )
-
-    logger.info(
-        "[DNTrade Status] Payload=%s",
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-        ),
-    )
-
-    try:
-        response = requests.post(
-            url,
-            json=payload,
-            headers=get_dntrade_headers(),
-            timeout=REQUEST_TIMEOUT,
-        )
-
-        log_http_response(
-            "[DNTrade Status]",
-            response,
-        )
-
-    except requests.Timeout:
-        logger.exception(
-            "[DNTrade Status] Timeout"
-        )
-        return False
-
-    except requests.RequestException:
-        logger.exception(
-            "[DNTrade Status] HTTP exception"
-        )
-        return False
-
-    except Exception:
-        logger.exception(
-            "[DNTrade Status] Unknown exception"
-        )
-        return False
-
-    if response.status_code in (
-        200,
-        201,
-    ):
-        logger.info(
-            "[DNTrade Status] SUCCESS "
-            "external_id=%s status=%s",
-            external_id,
-            new_status_id,
-        )
-
-        return True
-
-    logger.error(
-        "[DNTrade Status] ERROR "
-        "HTTP=%s body=%s",
-        response.status_code,
-        safe_response_text(response),
-    )
-
-    return False
-
-
-# ============================================================
-# DNTRADE - UPDATE NOTE
+# DNTRADE: UPDATE NOTE
 # ============================================================
 
 def update_dntrade_order_note(
-    order_data: dict,
-    payment_link: str,
-) -> bool:
+    order,
+    payment_link,
+):
     """
-    Записує payment URL у поле note через /orders/upload.
+    Записує посилання на оплату у note через /orders/upload.
 
     ВАЖЛИВО:
-    - external_id = GUID
-    - number = номер замовлення
-    - products = products із DNTrade
-    - order_status тут НЕ змінюємо
+    Поки що використовуємо той формат, який у нас є:
+        {
+            "orders": [
+                {
+                    "external_id": "...",
+                    "number": ...,
+                    "note": "...",
+                    "products": [...]
+                }
+            ]
+        }
 
-    Статус змінюється окремим /orders/setstatus
-    тільки після успішного update note.
+    Найважливіше зараз — побачити ПОВНУ відповідь API,
+    якщо DNTrade відхиляє цей payload.
     """
 
-    url = (
-        f"{DNTRADE_API_URL}"
-        f"/orders/upload"
-    )
+    url = f"{DNTRADE_API_URL}/orders/upload"
 
-    external_id = (
-        order_data.get("external_id")
-    )
+    external_id = order.get("external_id")
+    number = order.get("number")
 
-    number = (
-        order_data.get("number")
-    )
+    products = order.get("products")
 
-    products = (
-        order_data.get("products")
-        or []
-    )
-
-    if not external_id:
-        logger.error(
-            "[DNTrade Note] "
-            "external_id відсутній. "
-            "Оновлення неможливе."
-        )
-        return False
-
-    if not payment_link:
-        logger.error(
-            "[DNTrade Note] "
-            "payment_link порожній."
-        )
-        return False
-
-    # --------------------------------------------------------
-    # Формуємо об'єкт замовлення.
-    #
-    # НЕ додаємо order_status.
-    # Статус змінюється окремим endpoint.
-    # --------------------------------------------------------
+    if products is None:
+        products = []
 
     updated_order = {
         "external_id": external_id,
@@ -621,34 +480,18 @@ def update_dntrade_order_note(
     }
 
     logger.info(
-        "[DNTrade Note] POST %s",
+        "[DNTrade UPLOAD] POST %s",
         url,
     )
 
     logger.info(
-        "[DNTrade Note] "
-        "order=%s external_id=%s",
+        "[DNTrade UPLOAD] Order #%s",
         number,
-        external_id,
     )
 
     logger.info(
-        "[DNTrade Note] payment_link=%s",
-        payment_link,
-    )
-
-    logger.info(
-        "[DNTrade Note] products_count=%s",
-        len(products),
-    )
-
-    logger.info(
-        "[DNTrade Note] Payload=%s",
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            default=str,
-        ),
+        "[DNTrade UPLOAD] Payload: %s",
+        payload,
     )
 
     try:
@@ -658,391 +501,218 @@ def update_dntrade_order_note(
             headers=get_dntrade_headers(),
             timeout=REQUEST_TIMEOUT,
         )
-
-        log_http_response(
-            "[DNTrade Note]",
-            response,
-        )
-
-    except requests.Timeout:
-        logger.exception(
-            "[DNTrade Note] Timeout "
-            "order=%s",
-            number,
-        )
-        return False
-
-    except requests.RequestException:
-        logger.exception(
-            "[DNTrade Note] HTTP exception "
-            "order=%s",
-            number,
-        )
-        return False
-
     except Exception:
         logger.exception(
-            "[DNTrade Note] Unknown exception "
-            "order=%s",
-            number,
+            "[DNTrade UPLOAD] HTTP exception"
         )
-        return False
-
-    if response.status_code not in (
-        200,
-        201,
-    ):
-        logger.error(
-            "[DNTrade Note] FAILED "
-            "order=%s external_id=%s "
-            "HTTP=%s",
-            number,
-            external_id,
-            response.status_code,
-        )
-
-        logger.error(
-            "[DNTrade Note] API response=%s",
-            safe_response_text(response),
-        )
-
-        return False
-
-    # --------------------------------------------------------
-    # Пробуємо розібрати відповідь
-    # --------------------------------------------------------
-
-    try:
-        response_data = response.json()
-
-        logger.info(
-            "[DNTrade Note] Parsed response=%s",
-            json.dumps(
-                response_data,
-                ensure_ascii=False,
-                default=str,
-            ),
-        )
-
-    except ValueError:
-        logger.info(
-            "[DNTrade Note] "
-            "API response is not JSON."
-        )
+        return {
+            "success": False,
+            "status_code": None,
+            "response_text": None,
+            "response_json": None,
+        }
 
     logger.info(
-        "[DNTrade Note] SUCCESS "
-        "order=%s external_id=%s",
-        number,
-        external_id,
+        "[DNTrade UPLOAD] HTTP %s",
+        response.status_code,
     )
 
-    return True
+    logger.info(
+        "[DNTrade UPLOAD] Response: %s",
+        response.text[:20000],
+    )
+
+    response_json = None
+
+    try:
+        response_json = response.json()
+    except Exception:
+        pass
+
+    success = response.status_code in (200, 201)
+
+    return {
+        "success": success,
+        "status_code": response.status_code,
+        "response_text": response.text,
+        "response_json": response_json,
+    }
 
 
 # ============================================================
-# DNTRADE - GET ORDERS
+# DNTRADE: CHANGE STATUS
 # ============================================================
 
-def get_dntrade_orders() -> list:
+def change_dntrade_order_status(
+    external_id,
+    new_status_id,
+):
     """
-    GET /orders/list
+    Переводить замовлення у потрібний статус.
     """
 
-    url = (
-        f"{DNTRADE_API_URL}"
-        f"/orders/list"
-    )
+    url = f"{DNTRADE_API_URL}/orders/setstatus"
 
-    params = {
-        "limit": 50,
-        "page": 1,
+    payload = {
+        "id": external_id,
+        "external_id": external_id,
+        "status_id": new_status_id,
+        "status": new_status_id,
     }
 
     logger.info(
-        "[DNTrade Orders] GET %s",
+        "[DNTrade STATUS] POST %s",
         url,
     )
 
     logger.info(
-        "[DNTrade Orders] Params=%s",
-        params,
+        "[DNTrade STATUS] Payload: %s",
+        payload,
     )
 
     try:
-        response = requests.get(
+        response = requests.post(
             url,
+            json=payload,
             headers=get_dntrade_headers(),
-            params=params,
             timeout=REQUEST_TIMEOUT,
         )
-
-        log_http_response(
-            "[DNTrade Orders]",
-            response,
-        )
-
-    except requests.Timeout:
+    except Exception:
         logger.exception(
-            "[DNTrade Orders] Timeout"
+            "[DNTrade STATUS] HTTP exception"
         )
-        raise RuntimeError(
-            "DNTrade /orders/list timeout"
-        )
+        return {
+            "success": False,
+            "status_code": None,
+            "response_text": None,
+            "response_json": None,
+        }
 
-    except requests.RequestException as exc:
-        logger.exception(
-            "[DNTrade Orders] HTTP exception"
-        )
-        raise RuntimeError(
-            f"DNTrade /orders/list HTTP error: {exc}"
-        ) from exc
+    logger.info(
+        "[DNTrade STATUS] HTTP %s",
+        response.status_code,
+    )
 
-    if response.status_code != 200:
-        raise RuntimeError(
-            "DNTrade /orders/list returned "
-            f"HTTP {response.status_code}: "
-            f"{safe_response_text(response)}"
-        )
+    logger.info(
+        "[DNTrade STATUS] Response: %s",
+        response.text[:10000],
+    )
+
+    response_json = None
 
     try:
-        data = response.json()
-    except ValueError as exc:
-        raise RuntimeError(
-            "DNTrade /orders/list returned invalid JSON"
-        ) from exc
+        response_json = response.json()
+    except Exception:
+        pass
 
-    logger.info(
-        "[DNTrade Orders] Response parsed."
-    )
-
-    # --------------------------------------------------------
-    # Визначаємо масив orders.
-    # --------------------------------------------------------
-
-    if isinstance(data, list):
-        orders = data
-
-    elif isinstance(data, dict):
-
-        if isinstance(
-            data.get("data"),
-            list,
-        ):
-            orders = data["data"]
-
-        elif isinstance(
-            data.get("orders"),
-            list,
-        ):
-            orders = data["orders"]
-
-        elif isinstance(
-            data.get("items"),
-            list,
-        ):
-            orders = data["items"]
-
-        elif isinstance(
-            data.get("result"),
-            list,
-        ):
-            orders = data["result"]
-
-        else:
-            logger.error(
-                "[DNTrade Orders] "
-                "Не знайдено масив orders/data/items."
-            )
-
-            logger.error(
-                "[DNTrade Orders] data=%s",
-                data,
-            )
-
-            raise RuntimeError(
-                "Unexpected DNTrade /orders/list format"
-            )
-
-    else:
-        raise RuntimeError(
-            "Unexpected DNTrade /orders/list response type"
-        )
-
-    logger.info(
-        "[DNTrade Orders] "
-        "Отримано замовлень: %s",
-        len(orders),
-    )
-
-    return orders
+    return {
+        "success": response.status_code in (200, 201),
+        "status_code": response.status_code,
+        "response_text": response.text,
+        "response_json": response_json,
+    }
 
 
 # ============================================================
-# ORDER PROCESSING
+# PROCESS ONE ORDER
 # ============================================================
 
-def process_single_order(
-    order: dict,
-) -> dict:
+def process_single_order(order):
     """
     Обробка одного замовлення.
 
-    Послідовність:
-
-    1. Перевірити статус.
-    2. Створити IBAN.
-    3. Записати URL у note.
-    4. Змінити status -> 1.
+    Порядок:
+    1. Перевіряємо статус 15/16.
+    2. Рахуємо суму.
+    3. Створюємо IBAN invoice.
+    4. Записуємо payment link у note.
+    5. Тільки якщо note записано успішно —
+       змінюємо статус на 1.
     """
 
-    external_id = (
-        order.get("external_id")
-    )
+    external_id = order.get("external_id")
+    number = order.get("number")
+    raw_status = order.get("order_status")
 
-    number = (
-        order.get("number")
-    )
+    order_status = normalize_status(raw_status)
 
-    raw_status = (
-        order.get("order_status")
+    result = {
+        "external_id": external_id,
+        "number": number,
+        "order_status": order_status,
+        "success": False,
+    }
+
+    logger.info(
+        "============================================================"
     )
 
     logger.info(
-        "=================================================="
-    )
-
-    logger.info(
-        "[PROCESS] order=%s "
-        "external_id=%s "
-        "status=%s",
+        "[ORDER] №%s | external_id=%s | status=%s",
         number,
         external_id,
-        raw_status,
+        order_status,
     )
 
     # --------------------------------------------------------
-    # external_id
-    # --------------------------------------------------------
-
-    if not external_id:
-        logger.error(
-            "[PROCESS] order=%s "
-            "пропущено: немає external_id",
-            number,
-        )
-
-        return {
-            "number": number,
-            "external_id": None,
-            "success": False,
-            "error": "missing external_id",
-        }
-
-    # --------------------------------------------------------
-    # number
-    # --------------------------------------------------------
-
-    if number is None:
-        logger.error(
-            "[PROCESS] external_id=%s "
-            "пропущено: немає number",
-            external_id,
-        )
-
-        return {
-            "number": None,
-            "external_id": external_id,
-            "success": False,
-            "error": "missing number",
-        }
-
-    # --------------------------------------------------------
-    # status
-    # --------------------------------------------------------
-
-    try:
-        order_status = int(
-            raw_status
-        )
-    except (
-        TypeError,
-        ValueError,
-    ):
-        logger.error(
-            "[PROCESS] order=%s "
-            "invalid order_status=%r",
-            number,
-            raw_status,
-        )
-
-        return {
-            "number": number,
-            "external_id": external_id,
-            "success": False,
-            "error": "invalid order_status",
-        }
-
-    # --------------------------------------------------------
-    # status 15 / 16
+    # Перевірка статусу
     # --------------------------------------------------------
 
     if order_status not in (
         STATUS_FULL_PREPAY,
         STATUS_PARTIAL_PREPAY,
     ):
-        return {
-            "number": number,
-            "external_id": external_id,
-            "success": False,
-            "skipped": True,
-            "reason": (
-                f"status {order_status} "
-                "is not payable"
-            ),
-        }
-
-    # --------------------------------------------------------
-    # total_price
-    # --------------------------------------------------------
-
-    try:
-        total_price = parse_money(
-            order.get("total_price")
+        result["skipped"] = True
+        result["reason"] = (
+            f"status {order_status} is not payable"
         )
 
-    except ValueError as exc:
-        logger.error(
-            "[PROCESS] order=%s "
-            "invalid total_price: %s",
+        logger.info(
+            "[ORDER] №%s пропущено: статус %s не є payable",
             number,
-            exc,
+            order_status,
         )
 
-        return {
-            "number": number,
-            "external_id": external_id,
-            "success": False,
-            "error": str(exc),
-        }
+        return result
+
+    # --------------------------------------------------------
+    # Перевірка GUID
+    # --------------------------------------------------------
+
+    if not external_id:
+        result["error"] = "Немає external_id"
+
+        logger.error(
+            "[ORDER] №%s: відсутній external_id",
+            number,
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # Сума замовлення
+    # --------------------------------------------------------
+
+    total_price = decimal_value(
+        order.get("total_price")
+    )
 
     if total_price <= 0:
-        logger.error(
-            "[PROCESS] order=%s "
-            "total_price=%s <= 0",
-            number,
-            total_price,
+        result["error"] = (
+            f"Некоректна total_price: "
+            f"{order.get('total_price')}"
         )
 
-        return {
-            "number": number,
-            "external_id": external_id,
-            "success": False,
-            "error": "total_price must be > 0",
-        }
+        logger.error(
+            "[ORDER] №%s: некоректна сума %s",
+            number,
+            order.get("total_price"),
+        )
+
+        return result
 
     # --------------------------------------------------------
-    # payment amount
+    # Визначення суми платежу
     # --------------------------------------------------------
 
     if order_status == STATUS_FULL_PREPAY:
@@ -1050,9 +720,10 @@ def process_single_order(
         payment_amount = total_price
 
         description = (
-            f"Повна оплата "
-            f"замовлення №{number}"
+            f"Повна оплата замовлення №{number}"
         )
+
+        payment_type = "full"
 
     else:
 
@@ -1062,26 +733,26 @@ def process_single_order(
         )
 
         description = (
-            f"Передплата "
-            f"за замовлення №{number}"
+            f"Передплата за замовлення №{number}"
         )
 
-    payment_amount = payment_amount.quantize(
-        Decimal("0.01")
-    )
+        payment_type = "partial"
+
+    result["payment_type"] = payment_type
+    result["amount"] = float(payment_amount)
 
     logger.info(
-        "[PROCESS] order=%s "
-        "total_price=%s "
-        "payment_amount=%s",
+        "[ORDER] №%s | total_price=%s | "
+        "payment_amount=%s | type=%s",
         number,
         total_price,
         payment_amount,
+        payment_type,
     )
 
-    # ========================================================
-    # 1. CREATE IBAN INVOICE
-    # ========================================================
+    # --------------------------------------------------------
+    # Створення IBAN invoice
+    # --------------------------------------------------------
 
     payment_link = create_iban_payment_link(
         order_number=number,
@@ -1091,123 +762,89 @@ def process_single_order(
 
     if not payment_link:
 
+        result["error"] = (
+            "Не вдалося створити IBAN payment link"
+        )
+
         logger.error(
-            "[PROCESS] order=%s "
-            "IBAN payment link не створено",
+            "[ORDER] №%s: IBAN link не створено",
             number,
         )
 
-        return {
-            "number": number,
-            "external_id": external_id,
-            "success": False,
-            "error": "IBAN invoice creation failed",
-        }
+        return result
 
-    # ========================================================
-    # 2. UPDATE NOTE
-    # ========================================================
+    result["payment_link"] = payment_link
 
-    logger.info(
-        "[PROCESS] order=%s "
-        "Записуємо payment URL у note...",
-        number,
-    )
+    # --------------------------------------------------------
+    # Запис payment link у NOTE
+    # --------------------------------------------------------
 
-    note_ok = update_dntrade_order_note(
-        order_data=order,
+    note_result = update_dntrade_order_note(
+        order=order,
         payment_link=payment_link,
     )
 
-    if not note_ok:
+    result["note_update"] = note_result
 
-        logger.error(
-            "[PROCESS] order=%s "
-            "NOTE UPDATE FAILED.",
-            number,
+    if not note_result["success"]:
+
+        result["error"] = (
+            "Не вдалося записати payment link "
+            "у note. Статус НЕ змінюємо."
         )
 
-        # Дуже важливо:
-        # статус НЕ змінюємо.
-        #
-        # Інакше замовлення стане "Очікує оплату",
-        # але в ньому не буде payment URL.
+        logger.error(
+            "[ORDER] №%s: note НЕ записано. "
+            "Статус залишаємо %s.",
+            number,
+            order_status,
+        )
 
-        return {
-            "number": number,
-            "external_id": external_id,
-            "success": False,
-            "error": (
-                "DNTrade note update failed"
-            ),
-            "payment_link": payment_link,
-            "status_changed_to_1": False,
-            "note_updated": False,
-        }
-
-    # ========================================================
-    # 3. CHANGE STATUS -> 1
-    # ========================================================
+        return result
 
     logger.info(
-        "[PROCESS] order=%s "
-        "NOTE SUCCESS. "
-        "Changing status -> %s...",
+        "[ORDER] №%s: payment link успішно записано в note",
         number,
-        STATUS_WAITING_PAYMENT,
     )
 
-    status_ok = change_dntrade_order_status(
+    # --------------------------------------------------------
+    # Тільки після успішного NOTE -> status 1
+    # --------------------------------------------------------
+
+    status_result = change_dntrade_order_status(
         external_id=external_id,
         new_status_id=STATUS_WAITING_PAYMENT,
     )
 
-    if not status_ok:
+    result["status_update"] = status_result
+
+    if not status_result["success"]:
+
+        result["error"] = (
+            "Payment link записано в note, "
+            "але не вдалося змінити статус на 1."
+        )
 
         logger.error(
-            "[PROCESS] order=%s "
-            "STATUS UPDATE FAILED.",
+            "[ORDER] №%s: note записано, "
+            "але статус НЕ змінився.",
             number,
         )
 
-        return {
-            "number": number,
-            "external_id": external_id,
-            "success": False,
-            "error": (
-                "DNTrade status update failed"
-            ),
-            "payment_link": payment_link,
-            "status_changed_to_1": False,
-            "note_updated": True,
-        }
+        return result
 
-    # ========================================================
-    # SUCCESS
-    # ========================================================
+    # --------------------------------------------------------
+    # УСПІШНО
+    # --------------------------------------------------------
+
+    result["success"] = True
 
     logger.info(
-        "[PROCESS] SUCCESS "
-        "order=%s external_id=%s "
-        "amount=%s status=%s -> %s",
+        "[ORDER] №%s УСПІШНО оброблено.",
         number,
-        external_id,
-        payment_amount,
-        order_status,
-        STATUS_WAITING_PAYMENT,
     )
 
-    return {
-        "number": number,
-        "external_id": external_id,
-        "success": True,
-        "order_status_before": order_status,
-        "order_status_after": STATUS_WAITING_PAYMENT,
-        "amount": str(payment_amount),
-        "payment_link": payment_link,
-        "note_updated": True,
-        "status_changed_to_1": True,
-    }
+    return result
 
 
 # ============================================================
@@ -1219,130 +856,203 @@ def process_single_order(
     methods=["GET", "POST"],
 )
 def process_dntrade_orders():
-    """
-    Основний endpoint для Render Cron.
-    """
 
     # --------------------------------------------------------
-    # Optional authorization
+    # Авторизація cron
     # --------------------------------------------------------
 
-    if CRON_SECRET:
+    if not check_cron_secret():
 
-        supplied_secret = (
-            request.headers.get(
-                "X-Cron-Secret",
-                "",
-            )
+        logger.warning(
+            "[CRON] Невірний CRON_SECRET"
         )
 
-        if supplied_secret != CRON_SECRET:
-
-            logger.warning(
-                "[CRON] Unauthorized request"
-            )
-
-            return jsonify({
-                "status": "error",
-                "error": "Unauthorized",
-            }), 401
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "error": "Unauthorized",
+                }
+            ),
+            401,
+        )
 
     logger.info(
-        "=================================================="
+        "============================================================"
     )
 
     logger.info(
-        "[CRON] START processing"
+        "[CRON] START /cron/process"
     )
 
     try:
 
+        # ----------------------------------------------------
+        # Отримуємо замовлення
+        # ----------------------------------------------------
+
         orders = get_dntrade_orders()
 
-        result = {
-            "status": "success",
-            "total_orders": len(orders),
-            "processed_count": 0,
-            "skipped_count": 0,
-            "error_count": 0,
-            "orders": [],
-        }
+        # ----------------------------------------------------
+        # Статистика статусів
+        # ----------------------------------------------------
+
+        status_statistics = get_status_statistics(
+            orders
+        )
+
+        logger.info(
+            "[DNTrade] Статистика order_status: %s",
+            status_statistics,
+        )
 
         # ----------------------------------------------------
-        # Process each order
+        # Кількість payable
         # ----------------------------------------------------
+
+        payable_orders = []
 
         for order in orders:
 
-            if not isinstance(
-                order,
-                dict,
-            ):
-
-                logger.error(
-                    "[CRON] Order is not object: %r",
-                    order,
-                )
-
-                result[
-                    "error_count"
-                ] += 1
-
+            if not isinstance(order, dict):
                 continue
 
-            item_result = process_single_order(
+            status = normalize_status(
+                order.get("order_status")
+            )
+
+            if status in (
+                STATUS_FULL_PREPAY,
+                STATUS_PARTIAL_PREPAY,
+            ):
+                payable_orders.append(order)
+
+        logger.info(
+            "[DNTrade] Payable orders: %s",
+            len(payable_orders),
+        )
+
+        # ----------------------------------------------------
+        # Якщо немає статусів 15/16
+        # ----------------------------------------------------
+
+        if not payable_orders:
+
+            logger.warning(
+                "[DNTrade] НЕМАЄ замовлень зі статусами %s або %s.",
+                STATUS_FULL_PREPAY,
+                STATUS_PARTIAL_PREPAY,
+            )
+
+            return (
+                jsonify(
+                    {
+                        "status": "success",
+                        "message": (
+                            "У отриманих замовленнях "
+                            "немає payable статусів."
+                        ),
+                        "total_orders": len(orders),
+                        "status_statistics": status_statistics,
+                        "eligible_orders": 0,
+                        "processed_count": 0,
+                        "skipped_count": len(orders),
+                        "error_count": 0,
+                        "orders": [],
+                    }
+                ),
+                200,
+            )
+
+        # ----------------------------------------------------
+        # Обробляємо payable
+        # ----------------------------------------------------
+
+        results = []
+
+        processed_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        for order in payable_orders:
+
+            result = process_single_order(
                 order
             )
 
-            result[
-                "orders"
-            ].append(item_result)
+            results.append(result)
 
-            if item_result.get(
-                "skipped"
-            ):
-                result[
-                    "skipped_count"
-                ] += 1
+            if result.get("success"):
+                processed_count += 1
 
-            elif item_result.get(
-                "success"
-            ):
-                result[
-                    "processed_count"
-                ] += 1
+            elif result.get("skipped"):
+                skipped_count += 1
 
             else:
-                result[
-                    "error_count"
-                ] += 1
+                error_count += 1
+
+        # ----------------------------------------------------
+        # Response
+        # ----------------------------------------------------
+
+        response_data = {
+            "status": "success",
+            "total_orders": len(orders),
+            "status_statistics": status_statistics,
+            "eligible_orders": len(payable_orders),
+            "processed_count": processed_count,
+            "skipped_count": skipped_count,
+            "error_count": error_count,
+            "orders": results,
+        }
 
         logger.info(
-            "[CRON] FINISH "
-            "total=%s processed=%s "
-            "skipped=%s errors=%s",
-            result["total_orders"],
-            result["processed_count"],
-            result["skipped_count"],
-            result["error_count"],
+            "[CRON] FINISH: %s",
+            response_data,
         )
 
-        return jsonify(result), 200
+        return jsonify(response_data), 200
 
-    except Exception as exc:
+    except Exception as e:
 
         logger.exception(
-            "[CRON] FATAL ERROR"
+            "[CRON] Критична помилка"
         )
 
-        return jsonify({
-            "status": "error",
-            "error": str(exc),
-        }), 500
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "error": str(e),
+                }
+            ),
+            500,
+        )
 
 
 # ============================================================
-# HEALTH CHECK
+# HEALTH
+# ============================================================
+
+@app.route(
+    "/health",
+    methods=["GET", "HEAD"],
+)
+def health():
+
+    return (
+        jsonify(
+            {
+                "status": "ok",
+                "service": "DNTrade processor",
+            }
+        ),
+        200,
+    )
+
+
+# ============================================================
+# ROOT
 # ============================================================
 
 @app.route(
@@ -1351,21 +1061,20 @@ def process_dntrade_orders():
 )
 def index():
 
-    return jsonify({
-        "status": "DNTrade processor is active",
-        "service": "DNTrade -> IBAN Oplata",
-    }), 200
-
-
-@app.route(
-    "/health",
-    methods=["GET", "HEAD"],
-)
-def health():
-
-    return jsonify({
-        "status": "ok",
-    }), 200
+    return (
+        jsonify(
+            {
+                "status": "DNTrade processor is active",
+                "endpoint": "/cron/process",
+                "payable_statuses": [
+                    STATUS_FULL_PREPAY,
+                    STATUS_PARTIAL_PREPAY,
+                ],
+                "waiting_payment_status": STATUS_WAITING_PAYMENT,
+            }
+        ),
+        200,
+    )
 
 
 # ============================================================
@@ -1382,7 +1091,7 @@ if __name__ == "__main__":
     )
 
     logger.info(
-        "Starting Flask on port %s",
+        "Starting server on port %s",
         port,
     )
 
