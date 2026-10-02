@@ -43,7 +43,6 @@ HEADERS_DNTRADE = {
 
 
 def get_iban_headers():
-    """Формування заголовків для IBAN Oplata API (X-API-KEY / ApiKey)"""
     token = (IBAN_TOKEN or "").strip()
     return {
         "X-API-KEY": token,
@@ -57,7 +56,6 @@ def get_iban_headers():
 def create_iban_payment_link(
     order_number: int | str, amount: float, description: str
 ) -> str | None:
-    """Генерація посилання на оплату через API за схемою IBAN Oplata"""
     url = f"{IBAN_OPLATA_API_URL}{IBAN_ENDPOINT}"
 
     payload = {
@@ -93,19 +91,22 @@ def create_iban_payment_link(
 
 
 def update_dntrade_order_note(
-    external_id: str, number: int | str, payment_link: str
+    order_id: str, external_id: str, number: int | str, payment_link: str
 ) -> bool:
-    """Оновлення примітки замовлення в DNTrade через POST /orders/upload"""
+    """Оновлення примітки замовлення в DNTrade"""
     url = f"{DNTRADE_API_URL}/orders/upload"
-    payload = {
-        "orders": [
-            {
-                "external_id": external_id,
-                "number": number,
-                "note": payment_link,
-            }
-        ]
+    
+    order_payload = {
+        "number": number,
+        "note": payment_link,
     }
+    if order_id:
+        order_payload["id"] = order_id
+    if external_id:
+        order_payload["external_id"] = external_id
+
+    payload = {"orders": [order_payload]}
+    
     try:
         response = requests.post(
             url, json=payload, headers=HEADERS_DNTRADE, timeout=10
@@ -124,7 +125,7 @@ def change_dntrade_order_status(
 ) -> bool:
     """Зміна статусу замовлення в DNTrade через POST /orders/setstatus"""
     url = f"{DNTRADE_API_URL}/orders/setstatus"
-    payload = {"id": order_id, "status": new_status_id}
+    payload = {"id": order_id, "status_id": new_status_id}
     try:
         response = requests.post(
             url, json=payload, headers=HEADERS_DNTRADE, timeout=10
@@ -140,7 +141,6 @@ def change_dntrade_order_status(
 
 @app.route("/cron/process", methods=["GET", "POST"])
 def process_dntrade_orders():
-    """Сканування та обробка нових замовлень"""
     try:
         params = {"limit": 50, "page": 1}
 
@@ -204,7 +204,7 @@ def process_dntrade_orders():
                 continue
 
             note_ok = update_dntrade_order_note(
-                external_id, number, payment_link
+                order_id, external_id, number, payment_link
             )
 
             status_ok = False
