@@ -102,6 +102,28 @@ IBAN_ACCOUNT = os.environ.get(
 
 
 # ============================================================
+# EXISTING IBAN LINKS
+#
+# STATUS 16:
+#
+# total_price < 1500  -> LINK_200
+# total_price >= 1500 -> LINK_500
+#
+# Для STATUS 16 новий IBAN НІКОЛИ не створюється.
+# ============================================================
+
+LINK_200 = os.environ.get(
+    "LINK_200",
+    "",
+).strip()
+
+LINK_500 = os.environ.get(
+    "LINK_500",
+    "",
+).strip()
+
+
+# ============================================================
 # STATUSES
 # ============================================================
 
@@ -161,6 +183,9 @@ MODIFIED_LOOKBACK_MINUTES = int(
 # RECOVERY LINKS
 #
 # Старі IBAN, які вже були створені раніше.
+# Використовуються для STATUS 15,
+# якщо в конкретного замовлення вже був
+# створений IBAN.
 # ============================================================
 
 RECOVERY_PAYMENT_LINKS = {
@@ -303,13 +328,6 @@ def get_modified_window():
     ВАЖЛИВО:
     DNTrade отримує час у часовій зоні Europe/Kyiv,
     а не UTC.
-
-    Наприклад локально:
-    17:45:00
-
-    запит:
-    modified_from = 17:40:00
-    modified_to   = 17:45:00
     """
 
     now_local = datetime.now(
@@ -405,6 +423,8 @@ def build_cart(order):
 
 # ============================================================
 # IBAN
+#
+# НОВИЙ IBAN СТВОРЮЄТЬСЯ ТІЛЬКИ ДЛЯ STATUS 15.
 # ============================================================
 
 def create_iban_payment_link(
@@ -447,7 +467,7 @@ def create_iban_payment_link(
     try:
 
         logging.info(
-            "[IBAN] Створення рахунку | "
+            "[IBAN] Створення НОВОГО рахунку | "
             "№%s | amount=%s",
             order_number,
             round(amount, 2),
@@ -506,6 +526,53 @@ def create_iban_payment_link(
         )
 
         return None
+
+
+# ============================================================
+# GET LINK FOR STATUS 16
+#
+# ГОЛОВНА ЛОГІКА:
+#
+# total_price < 1500  -> LINK_200
+# total_price >= 1500 -> LINK_500
+#
+# НОВИЙ IBAN НЕ СТВОРЮЄТЬСЯ.
+# ============================================================
+
+def get_partial_prepayment_link(
+    total_price
+):
+    total_price = safe_float(
+        total_price,
+        0,
+    )
+
+    if total_price < 1500:
+
+        if not LINK_200:
+
+            return (
+                None,
+                "LINK_200_not_configured",
+            )
+
+        return (
+            LINK_200,
+            "environment_LINK_200",
+        )
+
+    # 1500 і більше
+    if not LINK_500:
+
+        return (
+            None,
+            "LINK_500_not_configured",
+        )
+
+    return (
+        LINK_500,
+        "environment_LINK_500",
+    )
 
 
 # ============================================================
@@ -1036,62 +1103,24 @@ def process_single_order(order):
                 "total_price <= 0",
         }
 
-    # --------------------------------------------------------
-    # Перевіряємо існуючий note
-    # --------------------------------------------------------
-
-    existing_note = str(
-        order.get("note") or ""
-    ).strip()
-
-    payment_link = None
-    iban_source = None
-
-    if (
-        "ibanoplata.com/iban-qr/"
-        in existing_note
-    ):
-
-        payment_link = existing_note
-        iban_source = "existing_note"
-
-    # --------------------------------------------------------
-    # Recovery
-    # --------------------------------------------------------
-
-    if (
-        not payment_link
-        and external_id
-        in RECOVERY_PAYMENT_LINKS
-    ):
-
-        payment_link = (
-            RECOVERY_PAYMENT_LINKS[
-                external_id
-            ]
-        )
-
-        iban_source = (
-            "recovery_existing_iban"
-        )
-
-    # --------------------------------------------------------
-    # Визначення суми
-    # --------------------------------------------------------
+    # ========================================================
+    # STATUS 16
+    #
+    # ТУТ МИ ВЗАГАЛІ НЕ ПЕРЕВІРЯЄМО
+    # І НЕ ВИКОРИСТОВУЄМО СТАРИЙ IBAN.
+    #
+    # Завжди:
+    #
+    # < 1500 -> LINK_200
+    # >=1500 -> LINK_500
+    #
+    # Новий IBAN НЕ створюється.
+    # ========================================================
 
     if (
         order_status
-        == STATUS_FULL_PREPAY
+        == STATUS_PARTIAL_PREPAY
     ):
-
-        payment_amount = total_price
-
-        description = (
-            f"Повна оплата "
-            f"замовлення №{number}"
-        )
-
-    else:
 
         payment_amount = min(
             PREPAYMENT_PARTIAL_AMOUNT,
@@ -1103,61 +1132,187 @@ def process_single_order(order):
             f"замовлення №{number}"
         )
 
-    payment_amount = round(
-        payment_amount,
-        2,
-    )
-
-    # --------------------------------------------------------
-    # Створюємо новий IBAN
-    # --------------------------------------------------------
-
-    if not payment_link:
-
-        payment_link = (
-            create_iban_payment_link(
-                number,
-                payment_amount,
-                description,
-            )
+        (
+            payment_link,
+            iban_source,
+        ) = get_partial_prepayment_link(
+            total_price
         )
 
-        iban_source = "new"
-
         if not payment_link:
+
+            if iban_source == (
+                "LINK_200_not_configured"
+            ):
+
+                reason = (
+                    "Для STATUS 16 і "
+                    f"total_price={total_price} "
+                    "потрібен LINK_200, "
+                    "але Environment Variable "
+                    "LINK_200 не заданий"
+                )
+
+            elif iban_source == (
+                "LINK_500_not_configured"
+            ):
+
+                reason = (
+                    "Для STATUS 16 і "
+                    f"total_price={total_price} "
+                    "потрібен LINK_500, "
+                    "але Environment Variable "
+                    "LINK_500 не заданий"
+                )
+
+            else:
+
+                reason = (
+                    "Не вдалося отримати "
+                    "існуюче посилання "
+                    "для STATUS 16"
+                )
+
+            logging.error(
+                "[ORDER] №%s | STATUS 16 | %s",
+                number,
+                reason,
+            )
 
             return {
                 "success": False,
                 "number": number,
                 "external_id":
                     external_id,
-
                 "order_status":
                     order_status,
-
                 "total_price":
                     total_price,
-
                 "payment_amount":
                     payment_amount,
-
                 "reason":
-                    "Не вдалося створити "
-                    "IBAN рахунок",
+                    reason,
+                "iban_created":
+                    False,
+                "iban_source":
+                    iban_source,
             }
 
-    logging.info(
-        "[ORDER] №%s | status=%s | "
-        "IBAN source=%s | %s",
-        number,
-        order_status,
-        iban_source,
-        payment_link,
-    )
+        logging.info(
+            "[ORDER] №%s | STATUS 16 | "
+            "total_price=%s | "
+            "використовую %s",
+            number,
+            total_price,
+            iban_source,
+        )
 
-    # --------------------------------------------------------
-    # Записуємо IBAN у DNTrade
-    # --------------------------------------------------------
+    # ========================================================
+    # STATUS 15
+    #
+    # Тут створення нового IBAN дозволено.
+    # Але якщо IBAN вже є в note або recovery —
+    # повторно не створюємо.
+    # ========================================================
+
+    else:
+
+        # ----------------------------------------------------
+        # Перевіряємо існуючий note
+        # ----------------------------------------------------
+
+        existing_note = str(
+            order.get("note") or ""
+        ).strip()
+
+        payment_link = None
+        iban_source = None
+
+        if (
+            "ibanoplata.com/iban-qr/"
+            in existing_note
+        ):
+
+            payment_link = existing_note
+            iban_source = "existing_note"
+
+        # ----------------------------------------------------
+        # Recovery
+        # ----------------------------------------------------
+
+        if (
+            not payment_link
+            and external_id
+            in RECOVERY_PAYMENT_LINKS
+        ):
+
+            payment_link = (
+                RECOVERY_PAYMENT_LINKS[
+                    external_id
+                ]
+            )
+
+            iban_source = (
+                "recovery_existing_iban"
+            )
+
+        payment_amount = total_price
+
+        description = (
+            f"Повна оплата "
+            f"замовлення №{number}"
+        )
+
+        # ----------------------------------------------------
+        # Якщо немає старого IBAN —
+        # створюємо новий.
+        # ----------------------------------------------------
+
+        if not payment_link:
+
+            payment_link = (
+                create_iban_payment_link(
+                    number,
+                    payment_amount,
+                    description,
+                )
+            )
+
+            iban_source = "new"
+
+            if not payment_link:
+
+                return {
+                    "success": False,
+                    "number": number,
+                    "external_id":
+                        external_id,
+
+                    "order_status":
+                        order_status,
+
+                    "total_price":
+                        total_price,
+
+                    "payment_amount":
+                        payment_amount,
+
+                    "reason":
+                        "Не вдалося створити "
+                        "IBAN рахунок",
+                }
+
+        logging.info(
+            "[ORDER] №%s | STATUS 15 | "
+            "IBAN source=%s | %s",
+            number,
+            iban_source,
+            payment_link,
+        )
+
+    # ========================================================
+    # ЗАПИСУЄМО ПОСИЛАННЯ В DNTRADE
+    # ========================================================
 
     upload_result = (
         update_dntrade_order(
@@ -1204,9 +1359,9 @@ def process_single_order(order):
                 upload_result,
         }
 
-    # --------------------------------------------------------
-    # Статус -> 1
-    # --------------------------------------------------------
+    # ========================================================
+    # СТАТУС -> 1
+    # ========================================================
 
     status_result = (
         change_dntrade_order_status(
@@ -1254,9 +1409,9 @@ def process_single_order(order):
                 status_result,
         }
 
-    # --------------------------------------------------------
+    # ========================================================
     # SUCCESS
-    # --------------------------------------------------------
+    # ========================================================
 
     return {
         "success": True,
@@ -1305,10 +1460,6 @@ def process_dntrade_orders():
 
     try:
 
-        # ----------------------------------------------------
-        # Отримуємо змінені замовлення.
-        # ----------------------------------------------------
-
         (
             orders,
             error,
@@ -1345,10 +1496,6 @@ def process_dntrade_orders():
                 500,
             )
 
-        # ----------------------------------------------------
-        # Статус-лист.
-        # ----------------------------------------------------
-
         status_list = (
             get_dntrade_status_list()
         )
@@ -1359,11 +1506,11 @@ def process_dntrade_orders():
         skipped_count = 0
         eligible_count = 0
 
-        # ----------------------------------------------------
-        # ДІАГНОСТИКА ЗНАЙДЕНИХ ЗАМОВЛЕНЬ
-        # ----------------------------------------------------
-
         changed_orders_debug = []
+
+        # ----------------------------------------------------
+        # DEBUG
+        # ----------------------------------------------------
 
         for order in orders:
 
@@ -1414,7 +1561,7 @@ def process_dntrade_orders():
             )
 
         # ----------------------------------------------------
-        # ОБРОБКА
+        # PROCESS
         # ----------------------------------------------------
 
         for order in orders:
@@ -1482,7 +1629,7 @@ def process_dntrade_orders():
                 )
 
         # ----------------------------------------------------
-        # СТАТИСТИКА
+        # STATUS STATISTICS
         # ----------------------------------------------------
 
         status_statistics = {}
@@ -1578,6 +1725,14 @@ def process_dntrade_orders():
                     "partial_prepayment_amount":
                         PREPAYMENT_PARTIAL_AMOUNT,
 
+                    "partial_prepayment_rules": {
+                        "less_than_1500":
+                            "LINK_200",
+
+                        "greater_or_equal_1500":
+                            "LINK_500",
+                    },
+
                     "status_statistics":
                         status_statistics,
 
@@ -1644,6 +1799,14 @@ def index():
 
                 "lookback_minutes":
                     MODIFIED_LOOKBACK_MINUTES,
+
+                "partial_prepayment_rules": {
+                    "less_than_1500":
+                        "LINK_200",
+
+                    "greater_or_equal_1500":
+                        "LINK_500",
+                },
             }
         ),
         200,
