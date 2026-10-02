@@ -17,10 +17,12 @@ IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-# ID станів замовлення з DNTrade
-STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 15))        # Передплата
-STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16))  # Передплата/Післясплата
-STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1))  # Очікуємо оплату
+# Звірені ID статусів з вашої CRM DNTrade:
+# 2 = Передплата (Повна)
+# 3 = Передплата/Післясплата (Часткова)
+STATUS_PREPAY_FULL = int(os.environ.get("STATUS_PREPAY_FULL", 2))
+STATUS_PREPAY_PARTIAL = int(os.environ.get("STATUS_PREPAY_PARTIAL", 3))
+STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1))
 
 HEADERS_DNTRADE = {
     "ApiKey": DNTRADE_TOKEN,
@@ -34,6 +36,7 @@ HEADERS_IBAN = {
 
 
 def calculate_order_total(order: dict) -> float:
+    """Обчислює загальну суму замовлення."""
     if "total_price" in order and order["total_price"] is not None:
         try:
             return float(order["total_price"])
@@ -54,6 +57,7 @@ def calculate_order_total(order: dict) -> float:
 
 
 def create_full_iban_link(order_id: str, order_number: str | int, amount: float) -> str | None:
+    """Генерує динамічне посилання на оплату всієї суми через IBAN API."""
     url = f"{IBAN_OPLATA_API_URL}/v1/payments/create"
     payload = {
         "order_id": str(order_id),
@@ -72,6 +76,7 @@ def create_full_iban_link(order_id: str, order_number: str | int, amount: float)
 
 
 def update_dntrade_order(external_id: str, order_number: str | int, payment_link: str) -> bool:
+    """Записує посилання на оплату в примітку замовлення в DNTrade."""
     url = f"{DNTRADE_API_URL}/orders/upload"
 
     payload = {
@@ -100,7 +105,7 @@ def update_dntrade_order(external_id: str, order_number: str | int, payment_link
 def run_pipeline():
     logging.info("--- Старт обробки замовлень ---")
     try:
-        # Берімо ОСТАННІ 50 замовлень (сорт за спаданням ID)
+        # Беремо останні 50 замовлень
         response = requests.get(
             f"{DNTRADE_API_URL}/orders/list",
             headers=HEADERS_DNTRADE,
@@ -116,12 +121,7 @@ def run_pipeline():
             data.get("orders", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
         )
 
-        logging.info(f"Отримано останніх замовлень з DNTrade: {len(orders)}")
-
-        # Виводимо номери та статуси найновіших замовлень для перевірки
-        recent_info = [(o.get("number"), o.get("order_status"), o.get("status")) for o in orders[:10]]
-        logging.info(f"Останні 10 замовлень (Номер, order_status, status): {recent_info}")
-
+        logging.info(f"Завантажено замовлень: {len(orders)}")
         processed_count = 0
 
         for order in orders:
@@ -134,6 +134,7 @@ def run_pipeline():
             except (ValueError, TypeError):
                 continue
 
+            # Фільтруємо лише замовлення зі статусами передплати (2 та 3)
             if order_status not in (STATUS_PREPAY_FULL, STATUS_PREPAY_PARTIAL):
                 continue
 
@@ -142,8 +143,11 @@ def run_pipeline():
             total_sum = calculate_order_total(order)
             link_to_save = None
 
+            # 1. Повна передплата (ID = 2) -> Динамічне посилання IBAN
             if order_status == STATUS_PREPAY_FULL:
                 link_to_save = create_full_iban_link(external_id, number, total_sum)
+
+            # 2. Часткова передплата (ID = 3) -> Фіксоване посилання (200 або 500 грн)
             elif order_status == STATUS_PREPAY_PARTIAL:
                 link_to_save = LINK_200 if total_sum < 1500 else LINK_500
 
