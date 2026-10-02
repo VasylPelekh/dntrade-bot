@@ -18,47 +18,58 @@ HEADERS_DNTRADE = {
 
 
 @app.route("/cron/process", methods=["GET", "POST"])
-def inspect_latest_order():
+def inspect_absolutely_latest_order():
     try:
-        # Пробуємо витягнути замовлення з явним напрямком сортування по спаданню
-        params_list = [
-            {"limit": 10, "sort_by": "id", "sort_dir": "desc"},
-            {"limit": 10, "order_by": "id", "order_dir": "desc"},
-            {"limit": 10, "sort": "-id"},
-            {"limit": 10}
-        ]
+        # 1. Запитуємо загальну кількість сторінок або передаємо великий offset/page
+        # Спробуємо отримати сторінку з сортуванням за датою/id
+        response = requests.get(
+            f"{DNTRADE_API_URL}/orders/list",
+            headers=HEADERS_DNTRADE,
+            params={"limit": 100, "page": 1},
+            timeout=10
+        )
 
-        all_orders = []
-        for params in params_list:
-            response = requests.get(
+        if response.status_code != 200:
+            return jsonify({"error": response.text}), response.status_code
+
+        data = response.json()
+        orders = data.get("data", []) if isinstance(data, dict) and "data" in data else (
+            data.get("orders", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        )
+
+        # Перевіряємо pagination meta, якщо вона є
+        total_pages = 1
+        if isinstance(data, dict):
+            meta = data.get("meta") or data.get("pagination") or {}
+            total_pages = meta.get("last_page") or meta.get("total_pages") or 1
+
+        # Якщо сторінок декілька, завантажуємо ОСТАННЮ сторінку
+        if total_pages > 1:
+            last_resp = requests.get(
                 f"{DNTRADE_API_URL}/orders/list",
                 headers=HEADERS_DNTRADE,
-                params=params,
+                params={"limit": 100, "page": total_pages},
                 timeout=10
             )
-            if response.status_code == 200:
-                data = response.json()
-                orders = data.get("data", []) if isinstance(data, dict) and "data" in data else (
-                    data.get("orders", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            if last_resp.status_code == 200:
+                last_data = last_resp.json()
+                orders = last_data.get("data", []) if isinstance(last_data, dict) and "data" in last_data else (
+                    last_data.get("orders", []) if isinstance(last_data, dict) else (last_data if isinstance(last_data, list) else [])
                 )
-                if orders:
-                    all_orders.extend(orders)
 
-        if not all_orders:
-            return jsonify({"message": "Замовлень не знайдено в CRM"}), 200
+        if not orders:
+            return jsonify({"message": "Замовлень не знайдено"}), 200
 
-        # Пошук замовлення з максимальним ID / новером
-        def get_order_key(item):
+        # Знаходимо замовлення з найбільшим номером
+        def extract_number(item):
             try:
-                # Перевіряємо номер або ID
-                num = item.get("number") or item.get("id") or 0
-                return int(num)
+                return int(item.get("number", 0))
             except (ValueError, TypeError):
                 return 0
 
-        latest_order = max(all_orders, key=get_order_key)
+        latest_order = max(orders, key=extract_number)
 
-        # Повертаємо структурований JSON тільки для найновішого замовлення
+        # Виводимо в браузер
         pretty_json = json.dumps(latest_order, ensure_ascii=False, indent=4)
         return Response(pretty_json, mimetype="application/json")
 
