@@ -4,6 +4,7 @@ import logging
 import requests
 from flask import Flask, jsonify, Response
 
+# Налаштування детального логування
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 app = Flask(__name__)
@@ -12,18 +13,18 @@ app = Flask(__name__)
 DNTRADE_API_URL = os.environ.get("DNTRADE_API_URL", "https://api.dntrade.com.ua").rstrip("/")
 DNTRADE_TOKEN = os.environ.get("DNTRADE_TOKEN")
 
-# За замовчуванням ставимо правильний URL https://api.ibanoplata.com
+# Базовий URL для IBAN Oplata
 IBAN_OPLATA_API_URL = os.environ.get("IBAN_OPLATA_API_URL", "https://api.ibanoplata.com").rstrip("/")
 IBAN_TOKEN = os.environ.get("IBAN_TOKEN")
 
-# Статичні посилання (якщо потрібні як фолбек)
+# Статичні фолбек-посилання з Render
 LINK_200 = os.environ.get("LINK_200")
 LINK_500 = os.environ.get("LINK_500")
 
-# Статуси з DNTrade
-STATUS_FULL_PREPAY = int(os.environ.get("STATUS_PREPAY_FULL", 15))
-STATUS_PARTIAL_PREPAY = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16))
-STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1))
+# Статуси замовлень у DNTrade
+STATUS_FULL_PREPAY = int(os.environ.get("STATUS_PREPAY_FULL", 15))       # Передплата (100%)
+STATUS_PARTIAL_PREPAY = int(os.environ.get("STATUS_PREPAY_PARTIAL", 16)) # Передплата + Післясплата
+STATUS_WAITING_PAYMENT = int(os.environ.get("STATUS_WAITING_PAYMENT", 1)) # Очікує оплату
 
 PREPAYMENT_PARTIAL_AMOUNT = float(os.environ.get("PREPAYMENT_PARTIAL_AMOUNT", 200.0))
 
@@ -34,33 +35,69 @@ HEADERS_DNTRADE = {
 
 HEADERS_IBAN = {
     "Authorization": f"Bearer {IBAN_TOKEN}",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    "Accept": "application/json"
 }
 
 
+def extract_url_from_response(data: dict) -> str | None:
+    """Витягує посилання на оплату з будь-якого формату відповіді IBAN API"""
+    if not isinstance(data, dict):
+        return None
+
+    # Прямі поля в корені об'єкта
+    for key in ["page_url", "url", "link", "payment_url", "short_url", "checkout_url", "invoice_url"]:
+        if data.get(key) and isinstance(data[key], str):
+            return data[key]
+
+    # Якщо об'єкт загорнутий у "data" або "result"
+    nested = data.get("data") or data.get("result")
+    if isinstance(nested, dict):
+        for key in ["page_url", "url", "link", "payment_url", "short_url", "checkout_url", "invoice_url"]:
+            if nested.get(key) and isinstance(nested[key], str):
+                return nested[key]
+
+    return None
+
+
 def create_iban_payment_link(order_number: int | str, amount: float, description: str) -> str | None:
-    """Генерація посилання на оплату через API або використання готових статичних посилань"""
-    
-    # 1. Спроба створити динамічний інвойс через IBAN-Oplata API
+    """
+    Автоматично пробує кілька стандартних эндпоінтів IBAN Oplata API.
+    Якщо жоден не спрацьовує — повертає фолбек-посилання LINK_200 / LINK_500.
+    """
     if IBAN_TOKEN:
-        url = f"{IBAN_OPLATA_API_URL}/invoices"
         payload = {
             "amount": round(amount, 2),
             "order_id": str(order_number),
             "description": description
         }
-        try:
-            response = requests.post(url, json=payload, headers=HEADERS_IBAN, timeout=10)
-            logging.info(f"[IBAN API] Response [{response.status_code}]: {response.text}")
-            if response.status_code in (200, 201):
-                data = response.json()
-                link = data.get("page_url") or data.get("url") or data.get("link") or data.get("payment_url")
-                if link:
-                    return link
-        except Exception as e:
-            logging.error(f"[IBAN API] Помилка створення інвойсу через API: {e}")
 
-    # 2. Фолбек на готові статичні посилання з Render, якщо API не повернуло посилання
+        # Список потенційних ш шляхів API у Swagger/IBAN oplata
+        endpoints = [
+            f"{IBAN_OPLATA_API_URL}/invoices",
+            f"{IBAN_OPLATA_API_URL}/links",
+            f"{IBAN_OPLATA_API_URL}/payment-links",
+            f"{IBAN_OPLATA_API_URL}/api/v1/invoices",
+            f"{IBAN_OPLATA_API_URL}/api/v1/links"
+        ]
+
+        for endpoint in endpoints:
+            try:
+                logging.info(f"[IBAN API] Надсилаємо POST {endpoint} з даними: {payload}")
+                response = requests.post(endpoint, json=payload, headers=HEADERS_IBAN, timeout=10)
+                logging.info(f"[IBAN API] Status: {response.status_code}, Response: {response.text}")
+
+                if response.status_code in (200, 201):
+                    res_json = response.json()
+                    payment_link = extract_url_from_response(res_json)
+                    if payment_link:
+                        logging.info(f"[IBAN API] Успішно отримано посилання: {payment_link}")
+                        return payment_link
+            except Exception as e:
+                logging.error(f"[IBAN API] Виключення при зверненні до {endpoint}: {e}")
+
+    # Фолбек на готові статичні посилання з Render, якщо API не вдалося
+    logging.warning("[IBAN API] Автоматична генерація через API не повернула URL. Перевіряємо фолбек-посилання.")
     if amount == 200.0 and LINK_200:
         return LINK_200
     if amount == 500.0 and LINK_500:
@@ -70,7 +107,7 @@ def create_iban_payment_link(order_number: int | str, amount: float, description
 
 
 def update_dntrade_order_note(external_id: str, number: int | str, payment_link: str) -> bool:
-    """Оновлення поля 'note' замовлення через /orders/upload"""
+    """Записує посилання в поле 'note' замовлення через /orders/upload"""
     url = f"{DNTRADE_API_URL}/orders/upload"
     payload = {
         "orders": [
@@ -91,7 +128,7 @@ def update_dntrade_order_note(external_id: str, number: int | str, payment_link:
 
 
 def change_dntrade_order_status(order_id: str | int, new_status_id: int) -> bool:
-    """Зміна статусу замовлення через /orders/setstatus"""
+    """Змінює статус замовлення в DNTrade через /orders/setstatus"""
     url = f"{DNTRADE_API_URL}/orders/setstatus"
     payload = {
         "id": order_id,
@@ -108,6 +145,7 @@ def change_dntrade_order_status(order_id: str | int, new_status_id: int) -> bool
 
 @app.route("/cron/process", methods=["GET", "POST"])
 def process_dntrade_orders():
+    """Головний маршрут для сканування нових замовлень DNTrade"""
     try:
         params = {"limit": 50, "page": 1}
         
@@ -131,6 +169,7 @@ def process_dntrade_orders():
         for order in orders:
             order_status = order.get("order_status")
             
+            # Працюємо тільки із замовленнями в статусах 15 та 16
             if order_status not in (STATUS_FULL_PREPAY, STATUS_PARTIAL_PREPAY):
                 continue
 
@@ -146,14 +185,17 @@ def process_dntrade_orders():
                 payment_amount = min(PREPAYMENT_PARTIAL_AMOUNT, total_price)
                 desc = f"Передплата за замовлення №{number}"
 
+            # 1. Генерація/отримання посилання
             payment_link = create_iban_payment_link(number, payment_amount, desc)
             
             if not payment_link:
-                logging.error(f"Не вдалося отримати/згенерувати посилання для замовлення №{number}")
+                logging.error(f"Не вдалося згенерувати або знайти посилання для замовлення №{number}")
                 continue
 
+            # 2. Оновлення примітки (note) в DNTrade
             note_ok = update_dntrade_order_note(external_id, number, payment_link)
 
+            # 3. Переведення замовлення в статус "Очікує оплату" (1)
             status_ok = False
             if note_ok:
                 status_ok = change_dntrade_order_status(order_id, STATUS_WAITING_PAYMENT)
