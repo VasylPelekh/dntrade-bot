@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
@@ -106,15 +106,24 @@ REQUEST_TIMEOUT = int(
 
 ORDERS_PAGE_SIZE = 50
 
+# Перевіряємо невелике перекриття по часу.
+#
+# Наприклад:
+# Cron 17:34:00
+# беремо modified_from приблизно 17:32:00
+#
+# Це захищає від ситуацій, коли DNTrade або Render
+# трохи затримали обробку зміни.
+MODIFIED_LOOKBACK_MINUTES = int(
+    os.environ.get("MODIFIED_LOOKBACK_MINUTES", "2")
+)
+
 
 # ============================================================
 # RECOVERY LINKS
 #
-# Ці три рахунки вже були створені під час попередніх
-# запусків. Використовуємо їх, щоб не створювати дублікати.
-#
-# Після успішного запису в DNTrade ці замовлення перейдуть
-# у статус 1 і більше не будуть оброблятися.
+# Ці рахунки вже були створені раніше.
+# Використовуємо їх, щоб не створювати дублікати.
 # ============================================================
 
 RECOVERY_PAYMENT_LINKS = {
@@ -184,11 +193,12 @@ def extract_orders(response_data):
 
 def format_dntrade_date(value):
     """
-    DNTrade upload очікує дату у форматі:
+    DNTrade upload очікує:
 
     YYYY-MM-DD HH:MM:SS
 
-    GET /orders/list може повертати ISO:
+    GET /orders/list може повертати:
+
     2026-10-02T13:51:24.167Z
     """
 
@@ -227,6 +237,45 @@ def format_dntrade_date(value):
     return value
 
 
+def get_modified_from():
+    """
+    Формує час для параметра modified_from.
+
+    DNTrade очікує:
+    YYYY-MM-DD HH:MM:SS
+
+    Використовуємо UTC і віднімаємо 2 хвилини,
+    щоб не пропустити замовлення через невелику затримку.
+    """
+
+    now_utc = datetime.now(timezone.utc)
+
+    modified_from = (
+        now_utc
+        - timedelta(
+            minutes=MODIFIED_LOOKBACK_MINUTES
+        )
+    )
+
+    return modified_from.strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+def get_modified_to():
+    """
+    Верхня межа періоду.
+
+    Беремо поточний UTC-час.
+    """
+
+    now_utc = datetime.now(timezone.utc)
+
+    return now_utc.strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
 # ============================================================
 # BUILD DNTRADE CART
 # ============================================================
@@ -249,7 +298,7 @@ def build_cart(order):
         }
     ]
 
-    POST /orders/upload очікує:
+    POST /orders/upload:
 
     cart: [
         {
@@ -400,6 +449,7 @@ def create_iban_payment_link(
         logging.exception(
             "[IBAN] Помилка створення рахунку"
         )
+
         return None
 
 
@@ -414,7 +464,7 @@ def update_dntrade_order(
     """
     POST /orders/upload.
 
-    Формат відповідно до Swagger:
+    Робочий формат:
 
     {
         "id": "...",
@@ -455,13 +505,11 @@ def update_dntrade_order(
             "success": False,
             "http_status": None,
             "response": None,
-            "error": "Не вдалося сформувати cart з products",
+            "error": (
+                "Не вдалося сформувати cart з products"
+            ),
             "cart": cart,
         }
-
-    # --------------------------------------------------------
-    # Основні поля
-    # --------------------------------------------------------
 
     payload = {
         "id": order_id,
@@ -478,7 +526,10 @@ def update_dntrade_order(
         "channel": order.get("channel") or "",
         "labels": (
             order.get("labels")
-            if isinstance(order.get("labels"), list)
+            if isinstance(
+                order.get("labels"),
+                list,
+            )
             else []
         ),
         "cart": cart,
@@ -487,23 +538,13 @@ def update_dntrade_order(
         },
     }
 
-    # --------------------------------------------------------
-    # Додаткові поля, якщо вони є в замовленні
-    # --------------------------------------------------------
-
     if order.get("reserve") is not None:
         payload["reserve"] = order.get("reserve")
 
     if order.get("private_id") is not None:
-        payload["private_id"] = order.get("private_id")
-
-    # --------------------------------------------------------
-    # Personal info
-    #
-    # GET /orders/list може містити partner / delivery.
-    # Не передаємо вигадані значення. Comment є головним
-    # полем, яке нам потрібно.
-    # --------------------------------------------------------
+        payload["private_id"] = order.get(
+            "private_id"
+        )
 
     try:
 
@@ -538,7 +579,10 @@ def update_dntrade_order(
         except ValueError:
             response_json = response.text
 
-        success = response.status_code in (200, 201)
+        success = response.status_code in (
+            200,
+            201,
+        )
 
         return {
             "success": success,
@@ -610,7 +654,10 @@ def change_dntrade_order_status(
             response_json = response.text
 
         return {
-            "success": response.status_code in (200, 201),
+            "success": response.status_code in (
+                200,
+                201,
+            ),
             "http_status": response.status_code,
             "response": response_json,
         }
@@ -632,16 +679,29 @@ def change_dntrade_order_status(
 # GET DNTRADE ORDERS
 # ============================================================
 
-def get_dntrade_orders():
+def get_dntrade_orders_modified():
 
     all_orders = []
+
     offset = 0
+
+    modified_from = get_modified_from()
+    modified_to = get_modified_to()
+
+    logging.info(
+        "[DNTrade Orders] Перевірка змінених замовлень: "
+        "modified_from=%s | modified_to=%s",
+        modified_from,
+        modified_to,
+    )
 
     while True:
 
         params = {
             "limit": ORDERS_PAGE_SIZE,
             "offset": offset,
+            "modified_from": modified_from,
+            "modified_to": modified_to,
         }
 
         url = f"{DNTRADE_API_URL}/orders/list"
@@ -656,9 +716,11 @@ def get_dntrade_orders():
             )
 
             logging.info(
-                "[DNTrade Orders] HTTP %s | offset=%s",
+                "[DNTrade Orders] HTTP %s | "
+                "offset=%s | params=%s",
                 response.status_code,
                 offset,
+                params,
             )
 
             if response.status_code != 200:
@@ -667,9 +729,22 @@ def get_dntrade_orders():
                     "status_code": response.status_code,
                     "error": response.text,
                     "offset": offset,
+                    "params": params,
                 }
 
-            data = response.json()
+            try:
+                data = response.json()
+            except ValueError:
+
+                return None, {
+                    "status_code": response.status_code,
+                    "error": (
+                        "DNTrade повернув не-JSON відповідь"
+                    ),
+                    "response": response.text,
+                    "offset": offset,
+                    "params": params,
+                }
 
             orders = extract_orders(data)
 
@@ -719,7 +794,11 @@ def get_dntrade_status_list():
         statuses = []
 
         if isinstance(data, dict):
-            if isinstance(data.get("data"), list):
+
+            if isinstance(
+                data.get("data"),
+                list,
+            ):
                 statuses = data["data"]
 
         return {
@@ -751,21 +830,27 @@ def process_single_order(order):
     number = order.get("number")
 
     try:
+
         order_status = int(
             order.get("order_status")
         )
+
     except (TypeError, ValueError):
 
         return {
             "success": False,
             "number": number,
             "external_id": external_id,
-            "reason": "Некоректний order_status",
-            "order_status": order.get("order_status"),
+            "reason": (
+                "Некоректний order_status"
+            ),
+            "order_status": order.get(
+                "order_status"
+            ),
         }
 
     # --------------------------------------------------------
-    # Тільки 15 та 16
+    # Тільки статуси 15 та 16
     # --------------------------------------------------------
 
     if order_status not in (
@@ -797,9 +882,7 @@ def process_single_order(order):
         }
 
     # --------------------------------------------------------
-    # Перевірка існуючого note
-    #
-    # Якщо посилання вже є — новий IBAN не створюємо.
+    # Перевіряємо існуючий note
     # --------------------------------------------------------
 
     existing_note = str(
@@ -815,7 +898,7 @@ def process_single_order(order):
         iban_source = "existing_note"
 
     # --------------------------------------------------------
-    # Recovery links для трьох рахунків, які вже створилися
+    # Recovery для старих IBAN
     # --------------------------------------------------------
 
     if (
@@ -858,7 +941,7 @@ def process_single_order(order):
     )
 
     # --------------------------------------------------------
-    # Якщо старого рахунку немає — створюємо новий
+    # Створюємо новий IBAN тільки якщо немає існуючого
     # --------------------------------------------------------
 
     if not payment_link:
@@ -881,12 +964,14 @@ def process_single_order(order):
                 "total_price": total_price,
                 "payment_amount": payment_amount,
                 "reason": (
-                    "Не вдалося створити IBAN рахунок"
+                    "Не вдалося створити "
+                    "IBAN рахунок"
                 ),
             }
 
     logging.info(
-        "[ORDER] №%s | status=%s | IBAN source=%s | %s",
+        "[ORDER] №%s | status=%s | "
+        "IBAN source=%s | %s",
         number,
         order_status,
         iban_source,
@@ -894,7 +979,7 @@ def process_single_order(order):
     )
 
     # --------------------------------------------------------
-    # UPLOAD / COMMENT
+    # Записуємо IBAN у DNTrade
     # --------------------------------------------------------
 
     upload_result = update_dntrade_order(
@@ -923,7 +1008,7 @@ def process_single_order(order):
         }
 
     # --------------------------------------------------------
-    # STATUS -> 1
+    # Змінюємо статус на 1
     # --------------------------------------------------------
 
     status_result = change_dntrade_order_status(
@@ -946,7 +1031,8 @@ def process_single_order(order):
             "status_changed": False,
             "reason": (
                 "Посилання успішно записано, "
-                "але статус не вдалося змінити на 1"
+                "але статус не вдалося змінити "
+                "на 1"
             ),
             "dntrade_status": status_result,
         }
@@ -982,9 +1068,12 @@ def process_dntrade_orders():
 
     try:
 
-        status_list = get_dntrade_status_list()
+        # ----------------------------------------------------
+        # Отримуємо тільки замовлення,
+        # які були змінені останні ~2 хвилини.
+        # ----------------------------------------------------
 
-        orders, error = get_dntrade_orders()
+        orders, error = get_dntrade_orders_modified()
 
         if orders is None:
 
@@ -994,14 +1083,20 @@ def process_dntrade_orders():
                         "status": "error",
                         "message": (
                             "Не вдалося отримати "
-                            "замовлення DNTrade"
+                            "змінені замовлення "
+                            "DNTrade"
                         ),
                         "error": error,
-                        "status_list": status_list,
                     }
                 ),
                 500,
             )
+
+        # ----------------------------------------------------
+        # Список статусів — тільки для діагностики.
+        # ----------------------------------------------------
+
+        status_list = get_dntrade_status_list()
 
         processed_orders = []
         errors = []
@@ -1009,15 +1104,22 @@ def process_dntrade_orders():
         skipped_count = 0
         eligible_count = 0
 
+        # ----------------------------------------------------
+        # ОБРОБКА
+        # ----------------------------------------------------
+
         for order in orders:
 
             if not isinstance(order, dict):
+                skipped_count += 1
                 continue
 
             try:
+
                 current_status = int(
                     order.get("order_status")
                 )
+
             except (TypeError, ValueError):
 
                 skipped_count += 1
@@ -1038,12 +1140,17 @@ def process_dntrade_orders():
             )
 
             if result.get("success"):
-                processed_orders.append(result)
+
+                processed_orders.append(
+                    result
+                )
+
             else:
+
                 errors.append(result)
 
         # ----------------------------------------------------
-        # STATISTICS
+        # СТАТИСТИКА ТІЛЬКИ ПО ЗМІНЕНИХ ЗАМОВЛЕННЯХ
         # ----------------------------------------------------
 
         status_statistics = {}
@@ -1058,13 +1165,23 @@ def process_dntrade_orders():
             )
 
             try:
+
                 status_id = str(
                     int(raw_status)
                 )
-            except (TypeError, ValueError):
-                status_id = str(raw_status)
 
-            status_statistics[status_id] = (
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                status_id = str(
+                    raw_status
+                )
+
+            status_statistics[
+                status_id
+            ] = (
                 status_statistics.get(
                     status_id,
                     0,
@@ -1078,9 +1195,19 @@ def process_dntrade_orders():
                     "status": "success",
 
                     "message":
-                        "Обробка DNTrade завершена",
+                        "Обробка змінених "
+                        "DNTrade завершена",
 
-                    "total_orders":
+                    "modified_from":
+                        get_modified_from(),
+
+                    "modified_to":
+                        get_modified_to(),
+
+                    "lookback_minutes":
+                        MODIFIED_LOOKBACK_MINUTES,
+
+                    "total_changed_orders":
                         len(orders),
 
                     "eligible_orders":
@@ -1157,6 +1284,9 @@ def index():
 
                 "service":
                     "DNTrade -> IBAN Oplata",
+
+                "mode":
+                    "modified_from polling",
             }
         ),
         200,
